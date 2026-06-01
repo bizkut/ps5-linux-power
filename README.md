@@ -1,82 +1,78 @@
-# PS5 CPU & memory/fabric P-state control (Linux)
+# PS5 power control — userspace PoC (no kernel module)
 
-Set and read PS5 CPU core P-states and the DF (memory/fabric) P-state from
-Linux via the SMU MP1 mailbox. There is no cpufreq/amd_pstate/amdgpu DPM
-on PS5-Linux, so this drives the SMU directly from small out-of-tree kernel
-modules (amd_smn_read/write). No kernel rebuild needed.
+Read and set the PS5 APU's power knobs (CPU P-state, DF/memory P-state, GPU
+GFXCLK) from Linux **without any kernel module**. The tools talk to the SMU MP1
+mailbox directly over the PCI config space of `0000:00:00.0` (SMN index `@0xB8`,
+data `@0xBC`) — the same transport the
+[cyan-skillfish-governor](https://github.com/filippor/cyan-skillfish-governor)
+uses, verified working on PS5.
 
-**What actually saves power:** lowering the CPU P-state changes frequency
-only, not voltage (all P-states share VID = 1.05 V), so it barely helps. The
-real lever is the DF/memory P-state: df3 → df2 cut wall power by ~15% on the
-tested unit. Below df2 the GPU/SoC dominates and Linux can't touch it.
+> **Proof of concept.** It works, but see *Caveat* below. For the safer,
+> kernel-locked variant see the module-based tools.
 
-## Files
-| File | What |
-|------|------|
-| `ps5_corepstate_ctl.c` | kernel module: CPU core P-state, `/dev/ps5cpc` (GET + guarded SET) |
-| `ps5_cpc.c` | CLI for the CPU module |
-| `pstate_msr.c` | read-only verify: active CPU P-state + table (freq and VID) |
-| `ps5_dfpstate_ctl.c` | kernel module: DF P-state, `/dev/ps5dfc` (GET + guarded SET) |
-| `ps5_dfc.c` | CLI for the DF module |
-| `ps5_dffreq_probe.c` | read-only: FCLK/UCLK per DF P-state (dumps to dmesg) |
-| `Makefile` | builds everything |
+| Tool | What | Power impact |
+|------|------|--------------|
+| `ps5_cpu` | CPU core P-state set/get + rail-voltage read | tiny at idle |
+| `ps5_df`  | DF (memory/fabric) P-state set/get | ~19 W (df3→df2) |
+| `ps5_gpu` | GPU GFXCLK set/get | ~30 W (2000→1500) ← biggest |
 
-## Build
+Measured on a real PS5, kernel 7.0.10, GPU id `0x13fb`. Run as **root**. Use at
+your own risk.
+
+## Build & run
 ```sh
-make                # all .ko + ps5_cpc + pstate_msr + ps5_dfc
-sudo modprobe msr   # pstate_msr needs /dev/cpu/*/msr
+make                      # just gcc — builds the 3 tools + governors/
+sudo ./ps5_gpu get        # gfxclk=2000 MHz
+sudo ./ps5_gpu set 1500 force
+sudo ./ps5_cpu set 0xff 7 # all cores -> P7 (800 MHz)
+sudo ./ps5_df  set 2 force # df3 -> df2  (~-19 W)
 ```
+No `insmod`, no `/dev`, no kernel headers — a single `gcc` and root is enough.
 
-## CPU core P-state
+## CPU — `ps5_cpu`  (msg 0x0b set / 0x0c get)
 ```sh
-sudo insmod ps5_corepstate_ctl.ko
-sudo ./ps5_cpc set 0xff 7      # all 8 cores -> P7 (800 MHz)
-sudo ./pstate_msr defs         # verify: MHz + VID per P-state
-sudo ./ps5_cpc set 0xff 0      # back to P0 (full clock)
-sudo rmmod ps5_corepstate_ctl  # also auto-restores every touched core to P0
+sudo ./ps5_cpu get 0            # core 0: P0 | cpu rail ~974 mV, gpu rail ~993 mV
+sudo ./ps5_cpu set 0xff 7       # ALL cores -> P7 (bitmask 0xff)
+sudo ./ps5_cpu set 0x01 0       # core 0 only -> P0
 ```
-Protocol (FW 4.51): RequestCorePstate 0x0b (set), QueryCorePstate 0x0c (read),
-arg = (core_sel & 0xff) | ((pstate & 0xf) << 16).
-**Gotcha:** SET's core_sel is a bitmask (core0=0x01 … all=0xff); QUERY's is
-a core id (0..7).
+SET takes a core **bitmask** (core0=0x01 … all=0xff); GET takes a core **id** (0..7).
+Voltage is **read-only** (the SMU sets CPU VID per P-state). P-states:
+`0=3200 1=2560 2=2327 3=1969 4=1829 5=1600 6=1280 7=800` MHz.
 
-CPU P-state table (measured via PStateDef MSRs):
-```
-P0 3200  P1 2560  P2 2327  P3 1969  P4 1829  P5 1600  P6 1280  P7 800 MHz
-all P-states @ VID 1.05 V   (frequency-only; no voltage change)
-```
-
-## DF (memory/fabric) P-state — the real power lever
+## DF (memory/fabric) — `ps5_df`  (msg 0x12 set / 0x13 get)
 ```sh
-sudo insmod ps5_dffreq_probe.ko   # one-shot: prints FCLK/UCLK per state to dmesg
-dmesg | tail; sudo rmmod ps5_dffreq_probe
+sudo ./ps5_df get               # df_pstate=3
+sudo ./ps5_df set 2 force       # df3 -> df2 (~-19 W); 'force' required
+sudo ./ps5_df set 3 force       # back to default
+```
+df3=1200/875, df2=750/425 (FCLK/UCLK MHz). ⚠ **df0/df1 are EXPERIMENTAL** — they
+can deadlock the SMU mailbox (recovery = reboot). Use df2/df3.
 
-sudo insmod ps5_dfpstate_ctl.ko   # captures current df-state as restore baseline
-sudo ./ps5_dfc get                # -> df_pstate=3 (Linux default = 1200/875)
-sudo ./ps5_dfc set 2 force        # df3 -> df2 (750/425) : ~15% less wall power
-sudo ./ps5_dfc set 3 force        # back to default
-sudo rmmod ps5_dfpstate_ctl       # auto-restores the baseline
+## GPU — `ps5_gpu`  (msg 0x0e set / 0x0f get)
+```sh
+sudo ./ps5_gpu get              # gfxclk=2000 MHz
+sudo ./ps5_gpu set 1500 force   # 2000 -> 1500 (~-30 W); 'force' required
+sudo ./ps5_gpu reset            # back to 2000 MHz
 ```
-Protocol (FW 4.51): RequestDfPstate 0x12 (set), QueryDfPstate 0x13 (read),
-arg = df_pstate 0..3. Sony's "mempstate" is inverted: df_pstate = 3 - mempstate.
-FCLK/UCLK read-only via TESTSMC 0x38/0x39.
+Range 400..2380 MHz. GFXCLK is the dominant power lever.
 
-DF P-state table (measured):
-```
-df0 250/225   df1 250/225   df2 750/425   df3 1200/875   (FCLK/UCLK MHz)
-```
+## Governors
+Load-adaptive CPU + GPU governors live in [`governors/`](governors/) — same
+userspace transport, no module. See its README.
 
-## Results (wall power, CPU pinned at 800 MHz)
-```
-df3  1200/875  -> 129 W   (default)
-df2   750/425  -> 110 W   (-19 W, ~15%)   <- best safe steady state
-df1   250/225  -> 105 W   (only -5 W more, and unsafe)
-```
+## Caveat (why this is a PoC)
+SMN access is a two-step (index→data) sequence on a register pair **shared by
+in-kernel SMN users** (e.g. `k10temp`, EDAC). The tools take an `flock`
+(`/run/lock/ps5-power.lock`) so they don't collide with **each other**, but they
+cannot take the kernel's SMN lock, so a tiny race window against in-kernel users
+remains. Never observed to misbehave in practice on PS5, but the kernel-module
+variant (which uses `amd_smn_read/write` under the kernel lock) is the safe path
+if you care.
 
-## Safety notes
-- SMN errors return -EIO, never panic.
-- DF/CPU modules auto-restore on rmmod (CPU → P0, DF → boot baseline).
-- DF writes need an explicit force arg; default is a no-op.
-- The MP1 mailbox is shared never run boost (UniversalMode) or two of these
-  modules' writes at the same time.
-- Tested on a real PS5, Ubuntu 26.04, self-built kernel 7.0.10. Use at your own risk.
+Also: these are one-shot CLIs — no auto-restore. To undo:
+`ps5_cpu set 0xff 0`, `ps5_gpu reset`, `ps5_df set 3 force`.
+
+## Safety
+- `force` is required for DF and GPU writes; both do read-before-write + poll/verify.
+- The MP1 mailbox is **shared** — never run two writers (or `ps5boost`) at once.
+- DF writes are the fragile part; keep to df2/df3 and be ready to reboot.

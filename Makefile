@@ -1,37 +1,26 @@
-# Build the kernel modules + userspace tools.
+# PS5 power-control -- userspace PoC, NO kernel module.
 #
-#   make            build all .ko modules and userspace tools
+#   make          build ps5_cpu, ps5_df, ps5_gpu, and governors/
 #   make clean
 #
-# Needs kernel build headers at /lib/modules/$(uname -r)/build and gcc.
+# Only needs gcc. The binaries talk to the SMU MP1 mailbox directly over PCI
+# config space (see smn.h) and must be run as root.
 
-obj-m += ps5_corepstate_ctl.o      # CPU core P-state control (/dev/ps5cpc)
-obj-m += ps5_dfpstate_ctl.o        # DF memory/fabric P-state control (/dev/ps5dfc)
-obj-m += ps5_dffreq_probe.o        # read-only FCLK/UCLK-per-DF-state probe
-
-KDIR ?= /lib/modules/$(shell uname -r)/build
-PWD  := $(shell pwd)
-CC   ?= gcc
+CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra
 
-TOOLS := ps5_cpc pstate_msr ps5_dfc
+TOOLS := ps5_cpu ps5_df ps5_gpu
 
-all: module $(TOOLS)
+all: $(TOOLS) governors
 
-module:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
-
-ps5_cpc: ps5_cpc.c
+$(TOOLS): %: %.c smn.h
 	$(CC) $(CFLAGS) -o $@ $<
 
-pstate_msr: pstate_msr.c
-	$(CC) $(CFLAGS) -o $@ $<
-
-ps5_dfc: ps5_dfc.c
-	$(CC) $(CFLAGS) -o $@ $<
+governors:
+	$(MAKE) -C governors
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
 	rm -f $(TOOLS)
+	$(MAKE) -C governors clean
 
-.PHONY: all module clean
+.PHONY: all governors clean
