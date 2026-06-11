@@ -7,14 +7,14 @@
  * PCI config space (see ../smn.h). Writes the mailbox ONLY when the target
  * P-state changes, so at steady idle there is zero mailbox traffic.
  *
- * Policy: load >= 0.40 -> P0 (3200) ; >= 0.20 -> P2 (2327) ;
+ * Policy: load >= 0.40 -> boost + P0 (3200+) ; >= 0.20 -> P2 (2327) ;
  *         >= 0.08 -> P5 (1600) ; else -> P7 (800).
  * Ramp UP immediate; ramp DOWN needs `down_count` consecutive low samples.
- * On SIGINT/SIGTERM: restore P0 and exit.
+ * On SIGINT/SIGTERM: leave boost mode, restore P0, and exit.
  *
  * Run as root. Do NOT run a kernel mailbox module or ps5boost concurrently.
  *
- * Usage: ps5_cpu_gov [-i ms] [-d downcount] [-v]
+ * Usage: ps5_cpu_gov [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-v]
  */
 #include <signal.h>
 #include <stdint.h>
@@ -37,6 +37,27 @@ static int interval_ms = 500, down_count = 6, verbose;
 static volatile sig_atomic_t stop;
 
 static void on_signal(int s) { (void)s; stop = 1; }
+
+static double parse_load_arg(const char *s)
+{
+	double v = strtod(s, NULL);
+
+	return v > 1.0 ? v / 100.0 : v;
+}
+
+static int validate_args(const char *prog)
+{
+	if (interval_ms < 50 || down_count < 1 ||
+	    up_high <= 0.0 || up_mid <= 0.0 || up_low <= 0.0 ||
+	    up_high > 1.0 || up_mid > 1.0 || up_low > 1.0 ||
+	    !(up_high > up_mid && up_mid > up_low)) {
+		fprintf(stderr,
+			"usage: %s [-i ms>=50] [-d downcount>=1] [-H high] [-M mid] [-L low] [-v]\n",
+			prog);
+		return -1;
+	}
+	return 0;
+}
 
 static int read_cpu(unsigned long long *busy, unsigned long long *total)
 {
@@ -74,30 +95,42 @@ static const char *mhz(uint32_t p)
 int main(int argc, char **argv)
 {
 	int opt, low_streak = 0;
+	int boost_on = 0;
 	unsigned long long pb = 0, pt = 0, b, t;
 	uint32_t current = P_MAX, target;
 	struct timespec ts;
 
-	while ((opt = getopt(argc, argv, "i:d:v")) != -1) {
+	while ((opt = getopt(argc, argv, "i:d:H:M:L:v")) != -1) {
 		switch (opt) {
 		case 'i': interval_ms = atoi(optarg); break;
 		case 'd': down_count = atoi(optarg); break;
+		case 'H': up_high = parse_load_arg(optarg); break;
+		case 'M': up_mid = parse_load_arg(optarg); break;
+		case 'L': up_low = parse_load_arg(optarg); break;
 		case 'v': verbose = 1; break;
 		default:
-			fprintf(stderr, "usage: %s [-i ms] [-d downcount] [-v]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-v]\n", argv[0]);
 			return 2;
 		}
 	}
+	if (validate_args(argv[0]))
+		return 2;
 
+	if (access(MP1_DEV, R_OK | W_OK)) {
+		perror("open " MP1_DEV " (required for boost)");
+		return 1;
+	}
 	if (smn_open()) return 1;
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
 
+	smn_boost_vote(SMN_BOOST_CPU, 0);
 	set_pstate(P_MAX);
 	current = P_MAX;
 	read_cpu(&pb, &pt);
 	if (verbose)
-		printf("ps5_cpu_gov: started, interval=%dms down_count=%d\n", interval_ms, down_count);
+		printf("ps5_cpu_gov: started, interval=%dms down_count=%d load=%.0f/%.0f/%.0f%%\n",
+		       interval_ms, down_count, up_high * 100, up_mid * 100, up_low * 100);
 
 	while (!stop) {
 		ts.tv_sec = interval_ms / 1000;
@@ -132,20 +165,38 @@ int main(int argc, char **argv)
 			low_streak = 0;
 		}
 
+		if (demand == P_MAX && !boost_on) {
+			if (smn_boost_vote(SMN_BOOST_CPU, 1) == 0) {
+				boost_on = 1;
+				if (verbose)
+					printf("cpu event=boost_on load=%.0f%%\n", load * 100);
+			}
+		}
+
 		if (target != current) {
 			if (set_pstate(target) == 0) {
 				if (verbose)
-					printf("load %.0f%% : P%u(%s) -> P%u(%s)\n",
-					       load * 100, current, mhz(current), target, mhz(target));
+					printf("cpu event=clock load=%.0f%% from=P%u(%s) to=P%u(%s) boost=%d\n",
+					       load * 100, current, mhz(current), target, mhz(target), boost_on);
 				current = target;
 			}
 		} else if (verbose) {
-			printf("load %.0f%% : hold P%u(%s)\n", load * 100, current, mhz(current));
+			printf("cpu event=hold load=%.0f%% target=P%u(%s) boost=%d\n",
+			       load * 100, current, mhz(current), boost_on);
+		}
+
+		if (demand != P_MAX && boost_on) {
+			if (smn_boost_vote(SMN_BOOST_CPU, 0) == 0) {
+				boost_on = 0;
+				if (verbose)
+					printf("cpu event=boost_off load=%.0f%%\n", load * 100);
+			}
 		}
 	}
 
 	set_pstate(P_MAX);
+	smn_boost_vote(SMN_BOOST_CPU, 0);
 	if (verbose)
-		printf("ps5_cpu_gov: stopped, restored P0 (3200)\n");
+		printf("ps5_cpu_gov: stopped boost=0 restored=P0(3200)\n");
 	return 0;
 }

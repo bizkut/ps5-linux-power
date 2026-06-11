@@ -1,0 +1,17 @@
+[Unit]
+Description=PS5 CPU/GPU load-adaptive governors
+Documentation=file:/usr/local/lib/ps5-linux-cpuclock/governors/README.md
+Conflicts=ps5boost.service
+After=multi-user.target dev-mp1.device
+ConditionPathExists=/dev/mp1
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/ps5-linux-cpuclock/ps5gov.conf
+ExecStart=/usr/local/lib/ps5-linux-cpuclock/governors/run-governors.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,115 @@
+#!/bin/sh
+set -u
+
+CONFIG="${PS5GOV_CONFIG:-/etc/ps5-linux-cpuclock/ps5gov.conf}"
+SERVICE="${PS5GOV_SERVICE:-ps5gov.service}"
+RUNNER="${PS5GOV_RUNNER:-/usr/local/lib/ps5-linux-cpuclock/governors/run-governors.sh}"
+TOOLS_DIR="${PS5GOV_TOOLS_DIR:-/usr/local/lib/ps5-linux-cpuclock}"
+CPU_CTL="$TOOLS_DIR/ps5_cpu"
+GPU_CTL="$TOOLS_DIR/ps5_gpu"
+BOOST_CTL="$TOOLS_DIR/ps5_boost"
+BOOST_STATE="/run/ps5-power.boost"
+
+usage() {
+	echo "usage: ps5govctl profile <quiet|balanced|performance>|config|sensors|status|restart|restore|stop-boost" >&2
+	exit 2
+}
+
+need_root() {
+	[ "$(id -u)" -eq 0 ] || {
+		echo "ps5govctl: must run as root" >&2
+		exit 1
+	}
+}
+
+write_profile() {
+	profile="$1"
+	case "$profile" in
+	quiet|balanced|performance) ;;
+	*) usage ;;
+	esac
+
+	need_root
+	mkdir -p "$(dirname "$CONFIG")"
+	if [ -f "$CONFIG" ] && grep -q '^PROFILE=' "$CONFIG"; then
+		tmp="${CONFIG}.tmp"
+		sed "s/^PROFILE=.*/PROFILE=$profile/" "$CONFIG" > "$tmp"
+		mv "$tmp" "$CONFIG"
+	else
+		printf 'PROFILE=%s\n' "$profile" >> "$CONFIG"
+	fi
+	systemctl restart "$SERVICE"
+}
+
+show_sensors() {
+	service_state=$(systemctl is-active "$SERVICE" 2>/dev/null || true)
+	[ -n "$service_state" ] || service_state=unknown
+	printf 'service=%s\n' "$service_state"
+	[ -x "$BOOST_CTL" ] && "$BOOST_CTL" status 2>/dev/null || {
+		if [ -r "$BOOST_STATE" ]; then
+			printf 'boost_state=%s\n' "$(cat "$BOOST_STATE")"
+		else
+			printf 'boost_state=0x0\n'
+		fi
+	}
+	[ -x "$CPU_CTL" ] && "$CPU_CTL" get 0 2>/dev/null || true
+	[ -x "$GPU_CTL" ] && "$GPU_CTL" get 2>/dev/null || true
+	PS5GOV_CONFIG="$CONFIG" "$RUNNER" --print-config 2>/dev/null || true
+
+	for temp_input in /sys/class/hwmon/hwmon*/temp*_input; do
+		[ -r "$temp_input" ] || continue
+		hwmon_dir=${temp_input%/*}
+		name=unknown
+		[ -r "$hwmon_dir/name" ] && name=$(cat "$hwmon_dir/name")
+		temp=$(awk '{printf "%.1f C", $1 / 1000}' "$temp_input")
+		printf 'sensor=%s name=%s temp=%s\n' "$temp_input" "$name" "$temp"
+	done
+}
+
+restore_defaults() {
+	need_root
+	systemctl stop "$SERVICE" 2>/dev/null || true
+	[ -x "$BOOST_CTL" ] && "$BOOST_CTL" off
+	[ -x "$CPU_CTL" ] && "$CPU_CTL" set 0xff 0
+	[ -x "$GPU_CTL" ] && "$GPU_CTL" reset
+}
+
+stop_boost() {
+	need_root
+	[ -x "$BOOST_CTL" ] || {
+		echo "ps5govctl: missing $BOOST_CTL (run 'make install')" >&2
+		exit 1
+	}
+	"$BOOST_CTL" off
+}
+
+[ "$#" -ge 1 ] || usage
+
+case "$1" in
+profile)
+	[ "$#" -eq 2 ] || usage
+	write_profile "$2"
+	;;
+status)
+	systemctl status "$SERVICE"
+	;;
+config)
+	PS5GOV_CONFIG="$CONFIG" "$RUNNER" --print-config
+	;;
+sensors)
+	show_sensors
+	;;
+restart)
+	need_root
+	systemctl restart "$SERVICE"
+	;;
+restore)
+	restore_defaults
+	;;
+stop-boost)
+	stop_boost
+	;;
+*)
+	usage
+	;;
+esac

@@ -60,17 +60,35 @@ you try with `force`, but don't unless you're ready to reboot.
 
 ## Governors (automatic, load-adaptive)
 Drive the clocks by load. Ramp up immediately, ramp down with hysteresis,
-restore full clock on Ctrl+C.
+enter `/dev/mp1` boost mode at the top load tier, and restore normal full clock
+on Ctrl+C. The GPU governor disables boost and caps at 1500 MHz above its
+thermal threshold until recovery temperature is reached. It uses GPU hwmon when
+available and falls back to `k10temp` on kernels without AMDGPU temperature.
 ```sh
 cd governors
 sudo ./ps5_cpu_gov -v               # CPU only, verbose (Ctrl+C to stop)
-sudo ./ps5_gpu_gov -v               # GPU only, verbose
+sudo ./ps5_gpu_gov -v -T 85 -R 75   # GPU only, verbose + thermal guard
 sudo ./run-governors.sh             # BOTH together (staggered intervals)
 ```
 Flags: `-i <ms>` interval, `-d <n>` low-samples before stepping down, `-v` verbose.
-To install as a boot service, edit the two paths in `governors/ps5gov.service`
-then `sudo cp` it to `/etc/systemd/system/` and `systemctl enable --now`.
-(Don't run a PoC governor and the module `ps5gov` at the same time.)
+Load thresholds: `-H <percent>` high, `-M <percent>` mid, `-L <percent>` low.
+GPU-only: `-T <C>` thermal cap temperature, `-R <C>` recovery temperature.
+GPU sources: `-S auto|gpu|k10temp`, `-m fdinfo|debugfs|auto|busy`.
+To install as a boot service:
+```sh
+sudo make install-systemd
+sudo systemctl daemon-reload
+sudo systemctl enable --now ps5gov
+```
+Profiles:
+```sh
+sudo ps5govctl profile quiet
+sudo ps5govctl profile balanced
+sudo ps5govctl profile performance
+ps5govctl config
+```
+`ps5gov.service` conflicts with `ps5boost.service`; don't run two MP1 power
+policy owners at the same time.
 
 ## Undo / restore defaults
 ```sh
