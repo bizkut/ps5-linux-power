@@ -6,16 +6,20 @@
  * nanosecond counter across all amdgpu DRM clients (proc fdinfo), computes
  * load = delta(gfx-ns)/delta(wall-ns), and drives GFXCLK via the SMU MP1
  * mailbox directly over PCI config space (see ../smn.h). Writes only when the
- * target changes.
+ * target changes by a meaningful amount.
  *
- * Policy: load >= 0.50 -> boost + 2230 ; >= 0.20 -> 1500 ; >= 0.05 -> 1200 ; else 800.
+ * Policy: compute a moving target inside the requested frequency range, up to
+ * 2000 MHz normally or 2230 MHz with boost.
  * Thermal guard: staged cap. Warm disables boost, hot caps at 1500, critical caps at 1200.
- * Ramp UP immediate; ramp DOWN needs `down_count` consecutive low samples.
+ * Ramp UP is rate-limited; burst mode uses a larger step. Ramp DOWN needs
+ * `down_count` consecutive low samples.
  * On SIGINT/SIGTERM: leave boost mode, restore 2000 MHz, and exit.
  *
  * Run as root. Do NOT run a kernel mailbox module or ps5boost concurrently.
  *
- * Usage: ps5_gpu_gov [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-T temp] [-R temp] [-S source] [-m method] [-v]
+ * Usage: ps5_gpu_gov [-P auto|quiet|balanced|performance] [-i ms] [-d downcount] [-H high] [-M mid] [-L low]
+ *                    [-A adjust_mhz] [-U step_mhz] [-b burst_step_mhz] [-B burst_samples]
+ *                    [-n min_mhz] [-x max_mhz] [-T temp] [-R temp] [-S source] [-m method] [-v]
  */
 #include <dirent.h>
 #include <fcntl.h>
@@ -35,14 +39,53 @@
 #define G_MID  1500
 #define G_LOW  1200
 #define G_IDLE  800
+#define STATUS_PATH "/run/ps5-power.gpu"
 
 static double up_high = 0.50, up_mid = 0.20, up_low = 0.05;
 static int interval_ms = 500, down_count = 6, throttle_temp = 85, recovery_temp = 75, verbose;
+static int adjust_mhz = 50, step_mhz = 150, burst_step_mhz = 500, burst_samples = 3;
+static uint32_t range_min_mhz = G_IDLE, range_max_mhz = G_BOOST;
+static const char *preset_name = "custom";
 static const char *temp_source = "auto";
 static const char *load_method = "fdinfo";
 static volatile sig_atomic_t stop;
 
 static void on_signal(int s) { (void)s; stop = 1; }
+
+static int apply_preset(const char *preset)
+{
+	if (!strcmp(preset, "auto") || !strcmp(preset, "balanced")) {
+		preset_name = preset;
+		interval_ms = 700; down_count = 3;
+		up_high = 0.50; up_mid = 0.20; up_low = 0.05;
+		adjust_mhz = 50; step_mhz = 150; burst_step_mhz = 500; burst_samples = 3;
+		range_min_mhz = G_IDLE; range_max_mhz = G_BOOST;
+		throttle_temp = 85; recovery_temp = 75;
+		temp_source = "auto"; load_method = "fdinfo";
+		return 0;
+	}
+	if (!strcmp(preset, "quiet")) {
+		preset_name = preset;
+		interval_ms = 900; down_count = 6;
+		up_high = 0.65; up_mid = 0.30; up_low = 0.08;
+		adjust_mhz = 80; step_mhz = 120; burst_step_mhz = 360; burst_samples = 4;
+		range_min_mhz = G_IDLE; range_max_mhz = G_MAX;
+		throttle_temp = 80; recovery_temp = 70;
+		temp_source = "auto"; load_method = "fdinfo";
+		return 0;
+	}
+	if (!strcmp(preset, "performance")) {
+		preset_name = preset;
+		interval_ms = 350; down_count = 5;
+		up_high = 0.30; up_mid = 0.12; up_low = 0.03;
+		adjust_mhz = 30; step_mhz = 220; burst_step_mhz = 700; burst_samples = 2;
+		range_min_mhz = G_LOW; range_max_mhz = G_BOOST;
+		throttle_temp = 90; recovery_temp = 80;
+		temp_source = "auto"; load_method = "fdinfo";
+		return 0;
+	}
+	return -1;
+}
 
 static int path_printf(char *buf, size_t len, const char *fmt, const char *a, const char *b)
 {
@@ -58,9 +101,23 @@ static double parse_load_arg(const char *s)
 	return v > 1.0 ? v / 100.0 : v;
 }
 
+static uint32_t parse_mhz_arg(const char *s)
+{
+	long v = strtol(s, NULL, 10);
+
+	return v < 0 ? 0 : (uint32_t)v;
+}
+
 static int validate_args(const char *prog)
 {
 	if (interval_ms < 50 || down_count < 1 ||
+	    adjust_mhz < 1 || adjust_mhz > 500 ||
+	    step_mhz < 1 || step_mhz > 1000 ||
+	    burst_step_mhz < step_mhz || burst_step_mhz > 1500 ||
+	    burst_samples < 0 || burst_samples > 64 ||
+	    range_min_mhz < 400 || range_min_mhz > G_BOOST ||
+	    range_max_mhz < 400 || range_max_mhz > G_BOOST ||
+	    range_min_mhz > range_max_mhz ||
 	    up_high <= 0.0 || up_mid <= 0.0 || up_low <= 0.0 ||
 	    up_high > 1.0 || up_mid > 1.0 || up_low > 1.0 ||
 	    !(up_high > up_mid && up_mid > up_low) ||
@@ -70,7 +127,7 @@ static int validate_args(const char *prog)
 	    (strcmp(load_method, "fdinfo") && strcmp(load_method, "debugfs") &&
 	     strcmp(load_method, "auto") && strcmp(load_method, "busy"))) {
 		fprintf(stderr,
-			"usage: %s [-i ms>=50] [-d downcount>=1] [-H high] [-M mid] [-L low] [-T 1..110] [-R 1..T-1] [-S auto|gpu|k10temp] [-m fdinfo|debugfs|auto|busy] [-v]\n",
+			"usage: %s [-P auto|quiet|balanced|performance] [-i ms>=50] [-d downcount>=1] [-H high] [-M mid] [-L low] [-A adjust_mhz] [-U step_mhz] [-b burst_step_mhz] [-B burst_samples] [-n 400..2230] [-x 400..2230] [-T 1..110] [-R 1..T-1] [-S auto|gpu|k10temp] [-m fdinfo|debugfs|auto|busy] [-v]\n",
 			prog);
 		return -1;
 	}
@@ -338,35 +395,122 @@ static int read_gpu_temp(void)
 	return temp;
 }
 
-static uint32_t level_to_mhz(int lvl, int boost)
+static uint32_t cap_to_mhz(int cap)
 {
-	switch (lvl) {
-	case 3: return boost ? G_BOOST : G_MAX; case 2: return G_MID;
-	case 1: return G_LOW; default: return G_IDLE;
+	switch (cap) {
+	case 1: return G_LOW;
+	case 2: return G_MID;
+	case 3: return G_MAX;
+	default: return G_BOOST;
 	}
+}
+
+static uint32_t clamp_mhz(uint32_t mhz, uint32_t min, uint32_t max)
+{
+	if (mhz < min)
+		return min;
+	if (mhz > max)
+		return max;
+	return mhz;
+}
+
+static uint32_t round10(uint32_t mhz)
+{
+	return ((mhz + 5) / 10) * 10;
+}
+
+static uint32_t interp_mhz(double load, double lo_load, double hi_load, uint32_t lo_mhz, uint32_t hi_mhz)
+{
+	double span, pos;
+
+	if (load <= lo_load)
+		return lo_mhz;
+	if (load >= hi_load)
+		return hi_mhz;
+	span = hi_load - lo_load;
+	pos = (load - lo_load) / span;
+	return round10((uint32_t)(lo_mhz + (hi_mhz - lo_mhz) * pos));
+}
+
+static uint32_t desired_mhz_for_load(double load, uint32_t max_mhz)
+{
+	uint32_t desired;
+
+	if (load < up_low)
+		desired = G_IDLE;
+	else if (load < up_mid)
+		desired = interp_mhz(load, up_low, up_mid, G_LOW, G_MID);
+	else if (load < up_high)
+		desired = interp_mhz(load, up_mid, up_high, G_MID, G_MAX);
+	else
+		desired = max_mhz;
+
+	return clamp_mhz(desired, G_IDLE, max_mhz);
+}
+
+static unsigned int mhz_diff(uint32_t a, uint32_t b)
+{
+	return a > b ? a - b : b - a;
+}
+
+static void write_status(double load, int temp, uint32_t current, uint32_t target,
+			 uint32_t desired, uint32_t min_mhz, uint32_t max_mhz,
+			 int boost, int thermal_cap, int burst)
+{
+	char tmp[] = STATUS_PATH ".tmp";
+	FILE *f = fopen(tmp, "w");
+
+	if (!f)
+		return;
+	fprintf(f, "preset=%s\n", preset_name);
+	fprintf(f, "load=%.3f\n", load);
+	fprintf(f, "temperature_c=%d\n", temp);
+	fprintf(f, "current_mhz=%u\n", current);
+	fprintf(f, "target_mhz=%u\n", target);
+	fprintf(f, "desired_mhz=%u\n", desired);
+	fprintf(f, "range_min_mhz=%u\n", min_mhz);
+	fprintf(f, "range_max_mhz=%u\n", max_mhz);
+	fprintf(f, "boost=%d\n", boost);
+	fprintf(f, "thermal_cap=%d\n", thermal_cap);
+	fprintf(f, "burst=%d\n", burst);
+	fclose(f);
+	rename(tmp, STATUS_PATH);
 }
 
 int main(int argc, char **argv)
 {
-	int opt, cur_lvl, low_streak = 0;
+	int opt, low_streak = 0, burst_streak = 0;
 	int boost_on = 0, boost_changed, thermal_cap = 0;
+	uint32_t cur_mhz = G_MAX, target_mhz = G_MAX;
 	unsigned long long pg, g;
 	struct timespec pt, t, ts;
 
-	while ((opt = getopt(argc, argv, "i:d:H:M:L:T:R:S:m:v")) != -1) {
+	while ((opt = getopt(argc, argv, "P:i:d:H:M:L:A:U:b:B:n:x:T:R:S:m:v")) != -1) {
 		switch (opt) {
+		case 'P':
+			if (apply_preset(optarg)) {
+				fprintf(stderr, "invalid preset '%s' (use auto, quiet, balanced, or performance)\n", optarg);
+				return 2;
+			}
+			break;
 		case 'i': interval_ms = atoi(optarg); break;
 		case 'd': down_count = atoi(optarg); break;
 		case 'H': up_high = parse_load_arg(optarg); break;
 		case 'M': up_mid = parse_load_arg(optarg); break;
 		case 'L': up_low = parse_load_arg(optarg); break;
+		case 'A': adjust_mhz = atoi(optarg); break;
+		case 'U': step_mhz = atoi(optarg); break;
+		case 'b': burst_step_mhz = atoi(optarg); break;
+		case 'B': burst_samples = atoi(optarg); break;
+		case 'n': range_min_mhz = parse_mhz_arg(optarg); break;
+		case 'x': range_max_mhz = parse_mhz_arg(optarg); break;
 		case 'T': throttle_temp = atoi(optarg); break;
 		case 'R': recovery_temp = atoi(optarg); break;
 		case 'S': temp_source = optarg; break;
 		case 'm': load_method = optarg; break;
 		case 'v': verbose = 1; break;
 		default:
-			fprintf(stderr, "usage: %s [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-T throttle_c] [-R recovery_c] [-S auto|gpu|k10temp] [-m fdinfo|debugfs|auto|busy] [-v]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-P auto|quiet|balanced|performance] [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-A adjust_mhz] [-U step_mhz] [-b burst_step_mhz] [-B burst_samples] [-n min_mhz] [-x max_mhz] [-T throttle_c] [-R recovery_c] [-S auto|gpu|k10temp] [-m fdinfo|debugfs|auto|busy] [-v]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -383,12 +527,12 @@ int main(int argc, char **argv)
 
 	smn_boost_vote(SMN_BOOST_GPU, 0);
 	set_gfx(G_MAX);
-	cur_lvl = 3;
 	pg = sum_gfx_ns();
 	clock_gettime(CLOCK_MONOTONIC, &pt);
 	if (verbose)
-		printf("ps5_gpu_gov: started interval_ms=%d down_count=%d load_thresholds=%.0f/%.0f/%.0f throttle_c=%d recovery_c=%d temp_source=%s load_method=%s\n",
-		       interval_ms, down_count, up_high * 100, up_mid * 100, up_low * 100,
+		printf("ps5_gpu_gov: started preset=%s interval_ms=%d down_count=%d load_thresholds=%.0f/%.0f/%.0f adjust_mhz=%d step_mhz=%d burst_step_mhz=%d burst_samples=%d range=%u..%u throttle_c=%d recovery_c=%d temp_source=%s load_method=%s\n",
+		       preset_name, interval_ms, down_count, up_high * 100, up_mid * 100, up_low * 100,
+		       adjust_mhz, step_mhz, burst_step_mhz, burst_samples, range_min_mhz, range_max_mhz,
 		       throttle_temp, recovery_temp, temp_source, load_method);
 
 	while (!stop) {
@@ -411,11 +555,10 @@ int main(int argc, char **argv)
 		}
 		pt = t;
 
-		int demand;
-		if (load >= up_high)      demand = 3;
-		else if (load >= up_mid)  demand = 2;
-		else if (load >= up_low)  demand = 1;
-		else                      demand = 0;
+		if (load >= up_high)
+			burst_streak++;
+		else
+			burst_streak = 0;
 
 		int temp = read_gpu_temp();
 		int next_cap = thermal_cap;
@@ -433,64 +576,80 @@ int main(int argc, char **argv)
 			thermal_cap = next_cap;
 			if (verbose)
 				printf("gpu event=thermal temp=%dC cap_level=%d cap_mhz=%u\n",
-				       temp, thermal_cap, thermal_cap ? level_to_mhz(thermal_cap, 0) : G_BOOST);
+				       temp, thermal_cap, cap_to_mhz(thermal_cap));
 		}
-		if (thermal_cap && demand > thermal_cap)
-			demand = thermal_cap;
 
-		int target = cur_lvl;
-		if (thermal_cap && cur_lvl > thermal_cap) {
-			target = thermal_cap;
+		int high_load = load >= up_high;
+		int burst = load >= 0.99 || (burst_samples > 0 && burst_streak >= burst_samples);
+		uint32_t requested_max = high_load ? range_max_mhz : clamp_mhz(range_max_mhz, range_min_mhz, G_MAX);
+		uint32_t cap_mhz = thermal_cap ? cap_to_mhz(thermal_cap) : requested_max;
+		uint32_t min_mhz = thermal_cap && cap_mhz < range_min_mhz ? cap_mhz : range_min_mhz;
+		uint32_t max_mhz = clamp_mhz(cap_mhz, min_mhz, requested_max);
+		uint32_t desired_mhz = desired_mhz_for_load(load, max_mhz);
+		uint32_t step = burst ? (uint32_t)burst_step_mhz : (uint32_t)step_mhz;
+		desired_mhz = clamp_mhz(desired_mhz, min_mhz, max_mhz);
+
+		if (thermal_cap && target_mhz > max_mhz) {
+			target_mhz = max_mhz;
 			low_streak = 0;
-		} else if (demand > cur_lvl) {
-			target = demand;
+		} else if (desired_mhz > target_mhz) {
+			target_mhz = clamp_mhz(target_mhz + step, min_mhz, desired_mhz);
 			low_streak = 0;
-		} else if (demand < cur_lvl) {
+		} else if (desired_mhz < target_mhz) {
 			if (++low_streak >= down_count) {
-				target = cur_lvl - 1;
-				if (target < demand)
-					target = demand;
+				if (target_mhz > desired_mhz + step)
+					target_mhz -= step;
+				else
+					target_mhz = desired_mhz;
 				low_streak = 0;
 			}
 		} else {
 			low_streak = 0;
 		}
+		target_mhz = clamp_mhz(target_mhz, min_mhz, max_mhz);
 
 		boost_changed = 0;
-		if (!thermal_cap && demand == 3 && !boost_on) {
+		int need_boost = !thermal_cap && (high_load || burst || target_mhz > G_MAX);
+		if (need_boost && !boost_on) {
 			if (smn_boost_vote(SMN_BOOST_GPU, 1) == 0) {
 				boost_on = 1;
 				boost_changed = 1;
 				if (verbose)
-					printf("gpu event=boost_on load=%.0f%% temp=%dC thermal_cap=%d\n",
-					       load * 100, temp, thermal_cap);
+					printf("gpu event=boost_on load=%.0f%% temp=%dC target=%u thermal_cap=%d burst=%d\n",
+					       load * 100, temp, target_mhz, thermal_cap, burst);
 			}
-		} else if ((thermal_cap || demand != 3) && boost_on) {
+		} else if (!need_boost && boost_on) {
 			if (smn_boost_vote(SMN_BOOST_GPU, 0) == 0) {
 				boost_on = 0;
 				boost_changed = 1;
 				if (verbose)
-					printf("gpu event=boost_off load=%.0f%% temp=%dC thermal_cap=%d\n",
-					       load * 100, temp, thermal_cap);
+					printf("gpu event=boost_off load=%.0f%% temp=%dC target=%u thermal_cap=%d burst=%d\n",
+					       load * 100, temp, target_mhz, thermal_cap, burst);
 			}
 		}
 
-		if (target != cur_lvl || boost_changed) {
-			if (set_gfx(level_to_mhz(target, boost_on)) == 0) {
+		int hit_bound = target_mhz == min_mhz || target_mhz == max_mhz;
+		int meaningful = mhz_diff(cur_mhz, target_mhz) >= (unsigned int)adjust_mhz;
+		if ((cur_mhz != target_mhz && (meaningful || burst || hit_bound)) || boost_changed) {
+			if (set_gfx(target_mhz) == 0) {
 				if (verbose)
-					printf("gpu event=clock load=%.0f%% temp=%dC from=%u to=%u boost=%d thermal_cap=%d\n",
-					       load * 100, temp, level_to_mhz(cur_lvl, boost_on),
-					       level_to_mhz(target, boost_on), boost_on, thermal_cap);
-				cur_lvl = target;
+					printf("gpu event=clock load=%.0f%% temp=%dC from=%u to=%u desired=%u boost=%d thermal_cap=%d burst=%d\n",
+					       load * 100, temp, cur_mhz, target_mhz, desired_mhz,
+					       boost_on, thermal_cap, burst);
+				cur_mhz = target_mhz;
 			}
 		} else if (verbose) {
-			printf("gpu event=hold load=%.0f%% temp=%dC target=%u boost=%d thermal_cap=%d\n",
-			       load * 100, temp, level_to_mhz(cur_lvl, boost_on), boost_on, thermal_cap);
+			printf("gpu event=hold load=%.0f%% temp=%dC current=%u target=%u desired=%u boost=%d thermal_cap=%d burst=%d\n",
+			       load * 100, temp, cur_mhz, target_mhz, desired_mhz,
+			       boost_on, thermal_cap, burst);
 		}
+		write_status(load, temp, cur_mhz, target_mhz, desired_mhz, min_mhz,
+			     max_mhz, boost_on, thermal_cap, burst);
 	}
 
 	set_gfx(G_MAX);
 	smn_boost_vote(SMN_BOOST_GPU, 0);
+	unlink(STATUS_PATH);
 	if (verbose)
 		printf("ps5_gpu_gov: stopped boost=0 restored=2000\n");
 	return 0;

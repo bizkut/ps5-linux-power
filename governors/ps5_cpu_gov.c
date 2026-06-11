@@ -31,6 +31,7 @@
 #define P_MID  2   /* 2327 MHz */
 #define P_LOW  5   /* 1600 MHz */
 #define P_IDLE 7   /*  800 MHz */
+#define STATUS_PATH "/run/ps5-power.cpu"
 
 static double up_high = 0.40, up_mid = 0.20, up_low = 0.08;
 static int interval_ms = 500, down_count = 6, verbose;
@@ -90,6 +91,27 @@ static const char *mhz(uint32_t p)
 {
 	static const char *tbl[8] = { "3200", "2560", "2327", "1969", "1829", "1600", "1280", "800" };
 	return (p < 8) ? tbl[p] : "?";
+}
+
+static void write_status(double load, uint32_t current, uint32_t target,
+			 uint32_t demand, int boost, int low_streak)
+{
+	char tmp[] = STATUS_PATH ".tmp";
+	FILE *f = fopen(tmp, "w");
+
+	if (!f)
+		return;
+	fprintf(f, "load=%.3f\n", load);
+	fprintf(f, "current_pstate=%u\n", current);
+	fprintf(f, "current_mhz=%s\n", mhz(current));
+	fprintf(f, "target_pstate=%u\n", target);
+	fprintf(f, "target_mhz=%s\n", mhz(target));
+	fprintf(f, "demand_pstate=%u\n", demand);
+	fprintf(f, "demand_mhz=%s\n", mhz(demand));
+	fprintf(f, "boost=%d\n", boost);
+	fprintf(f, "low_streak=%d\n", low_streak);
+	fclose(f);
+	rename(tmp, STATUS_PATH);
 }
 
 int main(int argc, char **argv)
@@ -192,10 +214,13 @@ int main(int argc, char **argv)
 					printf("cpu event=boost_off load=%.0f%%\n", load * 100);
 			}
 		}
+
+		write_status(load, current, target, demand, boost_on, low_streak);
 	}
 
 	set_pstate(P_MAX);
 	smn_boost_vote(SMN_BOOST_CPU, 0);
+	unlink(STATUS_PATH);
 	if (verbose)
 		printf("ps5_cpu_gov: stopped boost=0 restored=P0(3200)\n");
 	return 0;

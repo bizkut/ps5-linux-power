@@ -9,7 +9,7 @@ PREFIX ?= /usr/local
 LIBDIR ?= $(PREFIX)/lib/ps5-linux-cpuclock
 INSTALL ?= install
 
-GOVS := ps5_cpu_gov ps5_gpu_gov
+GOVS := ps5_cpu_gov ps5_gpu_gov ps5_fan_gov
 
 all: $(GOVS)
 
@@ -21,7 +21,7 @@ clean:
 
 install: all
 	$(INSTALL) -d $(DESTDIR)$(LIBDIR)/governors
-	$(INSTALL) -m 0755 $(GOVS) run-governors.sh ps5govctl $(DESTDIR)$(LIBDIR)/governors/
+	$(INSTALL) -m 0755 $(GOVS) run-governors.sh ps5govctl ps5gov-smoke.sh $(DESTDIR)$(LIBDIR)/governors/
 	$(INSTALL) -m 0644 ps5gov.conf $(DESTDIR)$(LIBDIR)/governors/
 
 .PHONY: all clean install

@@ -9,9 +9,14 @@ CPU_CTL="$TOOLS_DIR/ps5_cpu"
 GPU_CTL="$TOOLS_DIR/ps5_gpu"
 BOOST_CTL="$TOOLS_DIR/ps5_boost"
 BOOST_STATE="/run/ps5-power.boost"
+FAN_STATE="/run/ps5-power.fan"
+CPU_STATE="/run/ps5-power.cpu"
+GPU_STATE="/run/ps5-power.gpu"
+
+FAN_SERVICE="ps5fan.service"
 
 usage() {
-	echo "usage: ps5govctl profile <quiet|balanced|performance>|config|sensors|status|restart|restore|stop-boost" >&2
+	echo "usage: ps5govctl profile <auto|quiet|balanced|performance>|config|sensors|status|restart|restore|stop-boost" >&2
 	exit 2
 }
 
@@ -25,7 +30,7 @@ need_root() {
 write_profile() {
 	profile="$1"
 	case "$profile" in
-	quiet|balanced|performance) ;;
+	auto|quiet|balanced|performance) ;;
 	*) usage ;;
 	esac
 
@@ -43,8 +48,26 @@ write_profile() {
 
 show_sensors() {
 	service_state=$(systemctl is-active "$SERVICE" 2>/dev/null || true)
+	fan_state=$(systemctl is-active "$FAN_SERVICE" 2>/dev/null || true)
 	[ -n "$service_state" ] || service_state=unknown
+	[ -n "$fan_state" ] || fan_state=unknown
 	printf 'service=%s\n' "$service_state"
+	if [ -r "$FAN_STATE" ]; then
+		sed 's/^/fan_state_/' "$FAN_STATE"
+	else
+		printf 'fan_state=unknown\n'
+	fi
+	if [ -r "$CPU_STATE" ]; then
+		sed 's/^/cpu_state_/' "$CPU_STATE"
+	else
+		printf 'cpu_state=unknown\n'
+	fi
+	if [ -r "$GPU_STATE" ]; then
+		sed 's/^/gpu_state_/' "$GPU_STATE"
+	else
+		printf 'gpu_state=unknown\n'
+	fi
+	printf 'fan_service=%s\n' "$fan_state"
 	[ -x "$BOOST_CTL" ] && "$BOOST_CTL" status 2>/dev/null || {
 		if [ -r "$BOOST_STATE" ]; then
 			printf 'boost_state=%s\n' "$(cat "$BOOST_STATE")"

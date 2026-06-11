@@ -1,144 +1,292 @@
-# PS5 power control — userspace PoC (no kernel module)
+# ps5-linux-cpuclock
 
-Read and set the PS5 APU's power knobs (CPU P-state, DF/memory P-state, GPU
-GFXCLK) from Linux. The one-shot tools talk to the SMU MP1 mailbox directly over
-the PCI config space of `0000:00:00.0` (SMN index `@0xB8`, data `@0xBC`) — the
-same transport the
-[cyan-skillfish-governor](https://github.com/filippor/cyan-skillfish-governor)
-uses, verified working on PS5. The load-adaptive governors can also enter the
-kernel `/dev/mp1` boost envelope at the top load tier.
+PS5 CPU/GPU clock, boost, and telemetry tooling for Linux.
 
-> **Proof of concept.** It works, but see *Caveat* below. For the safer,
-> kernel-locked variant see the module-based tools.
+This repository is the userspace development and validation tree for PS5 APU
+power-control work. It provides small root-only tools for reading and changing
+CPU P-states, GPU GFXCLK, DF/memory P-states, and the MP1 boost envelope, plus
+load-adaptive governors that can be used as a systemd service.
 
-| Tool | What | Power impact |
-|------|------|--------------|
-| `ps5_cpu` | CPU core P-state set/get + rail-voltage read | tiny at idle |
-| `ps5_df`  | DF (memory/fabric) P-state set/get | ~19 W (df3→df2) |
-| `ps5_gpu` | GPU GFXCLK set/get | ~30 W (2000→1500) ← biggest |
-| `ps5_boost` | `/dev/mp1` boost envelope on/off/status | top-tier performance |
-| `ps5gov` | systemd CPU/GPU governors with boost-on-load | adaptive |
+The long-term production target is the kernel driver/patch stack carried by
+`ps5-linux-patches`. This repo remains useful for testing mailbox behavior,
+tuning policies, and validating governor logic before moving the stable pieces
+into the kernel.
 
-Measured on a real PS5, kernel 7.0.10, GPU id `0x13fb`. Run as **root**. Use at
-your own risk.
+## What It Does
 
-## Build & run
+| Component | Purpose | Typical use |
+| --- | --- | --- |
+| `ps5_cpu` | Read/set CPU core P-state | Manual CPU clock testing |
+| `ps5_gpu` | Read/set GPU GFXCLK | Manual GPU cap/testing |
+| `ps5_df` | Read/set DF memory/fabric P-state | Experimental power testing |
+| `ps5_boost` | Toggle/query `/dev/mp1` boost envelope | Recovery and manual boost tests |
+| `ps5gov` | CPU/GPU load-adaptive governors | Daily userspace policy service |
+| `ps5govctl` | Configure, inspect, and recover governors | Service operations |
+
+All mailbox tools require root.
+
+## Current Role
+
+This is not the final production driver. It is the userspace control and tuning
+environment for PS5 Linux power management.
+
+Use this repo to:
+
+- verify MP1/SMU commands on real PS5 hardware
+- tune CPU/GPU governor thresholds
+- validate boost behavior under game and desktop workloads
+- collect telemetry for the kernel driver patch
+- recover clocks/boost state during testing
+
+For packaged CachyOS BORE kernel builds, use the patch flow in
+`ps5-linux-patches` and `ps5-linux-image`. This repository supplies the behavior
+and driver logic that gets adapted into those patches.
+
+## Safety Model
+
+The userspace tools talk to the SMU MP1 mailbox through PCI config-space SMN
+index/data registers on `0000:00:00.0`.
+
+The tools serialize against each other with:
+
+```text
+/run/lock/ps5-power.lock
+```
+
+That prevents two userspace policy writers from colliding, but it does not take
+the kernel's internal SMN lock. Kernel users such as `k10temp` or EDAC may still
+touch SMN at the same time. That is the main reason this remains a userspace
+PoC instead of the final production mechanism.
+
+The kernel driver version should use the kernel SMN helpers/locking and expose
+stable interfaces for clock, boost, and telemetry control.
+
+## Performance Impact
+
+The build/profile workflow changes do not lower PS5 runtime performance by
+themselves. They only decide which kernel/profile gets built.
+
+The governors can lower clocks intentionally when the system is idle or lightly
+loaded, then ramp back up under load. That may reduce idle power and heat. Under
+high load, the default governor policy selects high CPU stages, moves the GPU
+target upward, and can vote for MP1 boost, so performance should recover when
+demand is present.
+
+Manual low clocks can reduce performance until restored:
+
 ```sh
-make                      # just gcc — builds the tools + governors/
-sudo ./ps5_gpu get        # gfxclk=2000 MHz
+sudo ./ps5_cpu set 0xff 0
+sudo ./ps5_gpu reset
+sudo ./ps5_df set 3 force
+sudo ./ps5_boost off
+```
+
+## Build
+
+```sh
+make
+```
+
+This builds:
+
+- `ps5_cpu`
+- `ps5_gpu`
+- `ps5_df`
+- `ps5_boost`
+- `governors/ps5_cpu_gov`
+- `governors/ps5_gpu_gov`
+- `governors/ps5_fan_gov`
+
+No kernel headers are required. The repo carries small fallback UAPI headers for
+stripped/custom PS5 Linux images.
+
+## Manual Tools
+
+### CPU P-State
+
+```sh
+sudo ./ps5_cpu get 0
+sudo ./ps5_cpu set 0xff 7
+sudo ./ps5_cpu set 0xff 0
+```
+
+`set` takes a core bitmask. `0xff` means all eight cores.
+
+Known P-states:
+
+| P-state | Frequency |
+| --- | --- |
+| `0` | 3200 MHz |
+| `1` | 2560 MHz |
+| `2` | 2327 MHz |
+| `3` | 1969 MHz |
+| `4` | 1829 MHz |
+| `5` | 1600 MHz |
+| `6` | 1280 MHz |
+| `7` | 800 MHz |
+
+### GPU GFXCLK
+
+```sh
+sudo ./ps5_gpu get
 sudo ./ps5_gpu set 1500 force
-sudo ./ps5_cpu set 0xff 7 # all cores -> P7 (800 MHz)
-sudo ./ps5_df  set 2 force # df3 -> df2  (~-19 W)
-sudo ./ps5_boost off      # clear /dev/mp1 boost envelope
+sudo ./ps5_gpu reset
 ```
-No kernel headers are required; the repo carries small fallback UAPI definitions
-for stripped/custom PS5 Linux images. Root is required.
 
-## CPU — `ps5_cpu`  (msg 0x0b set / 0x0c get)
-```sh
-sudo ./ps5_cpu get 0            # core 0: P0 | cpu rail ~974 mV, gpu rail ~993 mV
-sudo ./ps5_cpu set 0xff 7       # ALL cores -> P7 (bitmask 0xff)
-sudo ./ps5_cpu set 0x01 0       # core 0 only -> P0
-```
-SET takes a core **bitmask** (core0=0x01 … all=0xff); GET takes a core **id** (0..7).
-Voltage is **read-only** (the SMU sets CPU VID per P-state). P-states:
-`0=3200 1=2560 2=2327 3=1969 4=1829 5=1600 6=1280 7=800` MHz.
+The accepted range is currently `400..2380` MHz. GPU clock changes are usually
+the largest power lever.
 
-## DF (memory/fabric) — `ps5_df`  (msg 0x12 set / 0x13 get)
-```sh
-sudo ./ps5_df get               # df_pstate=3
-sudo ./ps5_df set 2 force       # df3 -> df2 (~-19 W); 'force' required
-sudo ./ps5_df set 3 force       # back to default
-```
-df3=1200/875, df2=750/425 (FCLK/UCLK MHz). ⚠ **df0/df1 are EXPERIMENTAL** — they
-can deadlock the SMU mailbox (recovery = reboot). Use df2/df3.
+### DF / Memory Fabric
 
-## GPU — `ps5_gpu`  (msg 0x0e set / 0x0f get)
 ```sh
-sudo ./ps5_gpu get              # gfxclk=2000 MHz
-sudo ./ps5_gpu set 1500 force   # 2000 -> 1500 (~-30 W); 'force' required
-sudo ./ps5_gpu reset            # back to 2000 MHz
+sudo ./ps5_df get
+sudo ./ps5_df set 2 force
+sudo ./ps5_df set 3 force
 ```
-Range 400..2380 MHz. GFXCLK is the dominant power lever.
 
-## Boost — `ps5_boost`
+Use `df2` and `df3` only for normal testing. Lower DF states are experimental
+and can wedge the mailbox until reboot.
+
+### MP1 Boost
+
 ```sh
-sudo ./ps5_boost on       # enter /dev/mp1 boost envelope
-sudo ./ps5_boost off      # exit boost envelope and clear shared vote state
-./ps5_boost status        # boost_state=0x0 or non-zero
+sudo ./ps5_boost on
+sudo ./ps5_boost off
+./ps5_boost status
 ```
-The governors normally manage boost votes themselves. This helper is mainly for
-manual recovery and service restore paths.
+
+The governors normally manage boost votes themselves. `ps5_boost` is mainly for
+manual testing and recovery.
 
 ## Governors
-Load-adaptive CPU + GPU governors live in [`governors/`](governors/). They lower
-clocks at idle, ramp up immediately under load, and vote `/dev/mp1` boost mode on
-at the top load tier:
 
-- CPU high load: boost on + P0 (`3200+ MHz` envelope)
-- GPU high load: boost on + `2230 MHz`
-- GPU warm: boost off + 2000 MHz cap
-- GPU hot: boost off + 1500 MHz cap
-- GPU critical: boost off + 1200 MHz cap until recovery (`k10temp` fallback if needed)
-- lower load: boost vote cleared, normal adaptive stages resume
-- stop/exit: boost vote cleared, CPU P0 and GPU 2000 restored
+The governor binaries live in `governors/`.
 
-Foreground:
+They monitor load and write only when the target changes by a meaningful amount.
+At steady idle there is no continuous mailbox traffic. CPU uses fixed clock
+stages; GPU uses a moving target frequency with burst ramping. Ramp-up is fast;
+ramp-down uses hysteresis.
+
+Run in the foreground:
+
 ```sh
 cd governors
 sudo ./run-governors.sh
 ```
 
-systemd:
+Install as a service:
+
 ```sh
 sudo make install-systemd
 sudo systemctl daemon-reload
-sudo systemctl disable --now ps5boost
 sudo systemctl enable --now ps5gov
 ```
 
-Profiles and thresholds are tuned through `/etc/ps5-linux-cpuclock/ps5gov.conf`
-or the helper:
+Configuration is installed at:
+
+```text
+/etc/ps5-linux-cpuclock/ps5gov.conf
+```
+
+Built-in profiles:
+
+- `auto`
+- `quiet`
+- `balanced`
+- `performance`
+
+`auto` is the default service profile. It currently uses the balanced CPU policy
+and the GPU governor's `-P auto` preset, which is an alias for `balanced`; the
+name is reserved so it can become truly adaptive later without changing user
+config.
+
+The GPU preset can still be narrowed with `GPU_ARGS`, including `-n <MHz>` and
+`-x <MHz>` for a requested min/max GPU target range. Runtime CPU/GPU governor
+state is written to `/run/ps5-power.cpu` and `/run/ps5-power.gpu`, then shown by
+`ps5govctl sensors`.
+
+Profile summary:
+
+| Profile | CPU policy | GPU policy |
+| `auto` | balanced defaults | `-P auto` |
+| `quiet` | slower sampling, higher load thresholds | `-P quiet` |
+| `balanced` | default daily profile | `-P balanced` |
+| `performance` | faster sampling, lower load thresholds | `-P performance` |
+
+Common operations:
+
 ```sh
 sudo ps5govctl profile quiet
 sudo ps5govctl profile balanced
 sudo ps5govctl profile performance
+sudo ps5govctl profile auto
 ps5govctl config
 ps5govctl sensors
 sudo ps5govctl stop-boost
 sudo ps5govctl restore
 ```
 
-Built-in profiles:
+`restore` stops the governor service, clears boost, restores CPU P0, and resets
+GPU GFXCLK to 2000 MHz.
 
-| Profile | CPU policy | GPU policy | Thermal |
-|---------|------------|------------|---------|
-| `quiet` | `-i 600 -d 6 -H 55 -M 30 -L 12` | `-i 900 -d 5 -H 65 -M 30 -L 8` | `-T 80 -R 70` |
-| `balanced` | `-i 400 -d 4 -H 40 -M 20 -L 8` | `-i 700 -d 3 -H 50 -M 20 -L 5` | `-T 85 -R 75` |
-| `performance` | `-i 250 -d 6 -H 25 -M 12 -L 4` | `-i 350 -d 5 -H 30 -M 12 -L 3` | `-T 90 -R 80` |
+## Smoke Test
 
-`ps5gov.service` conflicts with `ps5boost.service`; use one MP1 power policy
-owner at a time.
+After building on the target, run:
 
-`ps5govctl sensors` prints service state, boost vote state, available CPU/GPU
-readbacks, effective governor config, and every exposed hwmon temperature. Use
-`stop-boost` to clear only the `/dev/mp1` boost envelope. Use `restore` to stop
-`ps5gov`, clear boost, set CPU P0, and reset GPU to 2000 MHz.
+```sh
+governors/ps5gov-smoke.sh
+```
 
-## Caveat (why this is a PoC)
-SMN access is a two-step (index→data) sequence on a register pair **shared by
-in-kernel SMN users** (e.g. `k10temp`, EDAC). The tools take an `flock`
-(`/run/lock/ps5-power.lock`) so they don't collide with **each other**, but they
-cannot take the kernel's SMN lock, so a tiny race window against in-kernel users
-remains. Never observed to misbehave in practice on PS5, but the kernel-module
-variant (which uses `amd_smn_read/write` under the kernel lock) is the safe path
-if you care.
+That checks scripts, binaries, config rendering, and sensor/control plumbing
+without restarting services. On a real PS5 install, the root-only lifecycle check
+is:
 
-Also: the one-shot CLIs do not auto-restore. To undo:
-`ps5_cpu set 0xff 0`, `ps5_gpu reset`, `ps5_df set 3 force`.
+```sh
+sudo governors/ps5gov-smoke.sh --service
+```
 
-## Safety
-- `force` is required for DF and GPU writes; both do read-before-write + poll/verify.
-- The MP1 mailbox is **shared** — never run two policy writers at once.
-- `ps5gov` needs `/dev/mp1` for boost control.
-- DF writes are the fragile part; keep to df2/df3 and be ready to reboot.
+`--service` reloads systemd, restarts `ps5gov.service`, reads sensors, then runs
+`ps5govctl restore` to stop the service and restore CPU/GPU defaults.
+
+## Fan Policy
+
+Fan control is intentionally separate from CPU/GPU clock control.
+
+`ps5gov.conf` defaults to:
+
+```text
+FAN_ENABLED=0
+```
+
+Enable fan governor testing only when you explicitly want this service to own fan
+policy. Do not run multiple fan policy daemons at the same time.
+
+When `FAN_ENABLED=1`, `ps5_fan_gov` uses hysteresis (`-H` high temperature,
+`-L` low temperature) to switch the EMC fan servo pattern exposed by the current
+`/dev/icc` ioctl. Its `auto` sensor mode tracks the hottest readable hwmon
+temperature, writes structured state to `/run/ps5-power.fan`, restores the
+default pattern on normal exit, and fails safe to the cool pattern after repeated
+sensor read errors.
+
+## Production Driver Direction
+
+The production-quality path is to move the stable parts of this behavior into
+kernel patches:
+
+- MP1 mailbox access under kernel locking
+- PS5 CPU clock/boost controls
+- GPU telemetry and GFXCLK reporting/control where appropriate
+- safe hwmon/sysfs interfaces
+- integration with the CachyOS BORE PS5 kernel profile
+
+Userspace remains useful for experiments, service policy, and recovery tools,
+but direct SMN writes from userspace should not be the final interface for broad
+distribution.
+
+## Notes
+
+- Tested on real PS5 hardware.
+- Requires root for mailbox writes.
+- Do not run multiple mailbox policy writers at once.
+- Keep DF testing conservative.
+- Be ready to reboot when testing experimental mailbox commands.

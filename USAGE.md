@@ -16,6 +16,9 @@ Also: don't run the module CLIs (`../ps5_cpu` etc.), `ps5boost`, or two of these
 tools at the same time. The PoC tools serialize against *each other* via an
 `flock`, but not against the kernel modules.
 
+Fan control is intentionally separate from `ps5gov`/`ps5_boost` and is handled by
+`ps5fan` on this platform.
+
 ## Build
 ```sh
 make           # gcc only -> ps5_cpu, ps5_df, ps5_gpu, governors/ps5_*_gov
@@ -59,21 +62,30 @@ mailbox** in testing — recovery needs a **reboot**. The tool warns and still l
 you try with `force`, but don't unless you're ready to reboot.
 
 ## Governors (automatic, load-adaptive)
-Drive the clocks by load. Ramp up immediately, ramp down with hysteresis,
-enter `/dev/mp1` boost mode at the top load tier, and restore normal full clock
-on Ctrl+C. The GPU governor disables boost and caps at 1500 MHz above its
+Drive the clocks by load. CPU uses fixed P-state tiers; GPU uses a moving target
+frequency with burst ramping. Ramp down uses hysteresis. The governors enter
+`/dev/mp1` boost mode at the top load tier and restore normal full clock on
+Ctrl+C. The GPU governor disables boost and caps frequency above its
 thermal threshold until recovery temperature is reached. It uses GPU hwmon when
 available and falls back to `k10temp` on kernels without AMDGPU temperature.
 ```sh
 cd governors
 sudo ./ps5_cpu_gov -v               # CPU only, verbose (Ctrl+C to stop)
-sudo ./ps5_gpu_gov -v -T 85 -R 75   # GPU only, verbose + thermal guard
+sudo ./ps5_gpu_gov -v -P auto       # GPU only, verbose + preset policy
 sudo ./run-governors.sh             # BOTH together (staggered intervals)
 ```
 Flags: `-i <ms>` interval, `-d <n>` low-samples before stepping down, `-v` verbose.
 Load thresholds: `-H <percent>` high, `-M <percent>` mid, `-L <percent>` low.
-GPU-only: `-T <C>` thermal cap temperature, `-R <C>` recovery temperature.
+GPU-only: `-P auto|quiet|balanced|performance` selects a built-in preset.
+`auto` currently aliases `balanced` and is the default service profile.
+`-A <MHz>` significant-change threshold, `-U <MHz>` normal ramp step,
+`-b <MHz>` burst ramp step, `-B <n>` high-load samples before burst,
+`-n <MHz>` minimum GPU target, `-x <MHz>` maximum GPU target,
+`-T <C>` thermal cap temperature, `-R <C>` recovery temperature.
 GPU sources: `-S auto|gpu|k10temp`, `-m fdinfo|debugfs|auto|busy`.
+The CPU and GPU governors write runtime state to `/run/ps5-power.cpu` and
+`/run/ps5-power.gpu`; `ps5govctl sensors` prints those fields with
+`cpu_state_` and `gpu_state_` prefixes.
 To install as a boot service:
 ```sh
 sudo make install-systemd
@@ -85,10 +97,29 @@ Profiles:
 sudo ps5govctl profile quiet
 sudo ps5govctl profile balanced
 sudo ps5govctl profile performance
+sudo ps5govctl profile auto
 ps5govctl config
 ```
 `ps5gov.service` conflicts with `ps5boost.service`; don't run two MP1 power
 policy owners at the same time.
+
+Target smoke checks:
+```sh
+governors/ps5gov-smoke.sh
+sudo governors/ps5gov-smoke.sh --service
+```
+The default mode checks local build/config/sensor plumbing. `--service` reloads
+systemd, restarts `ps5gov.service`, reads sensors, then restores defaults.
+
+`FAN_ENABLED=1` is optional in `/etc/ps5-linux-cpuclock/ps5gov.conf` and will
+switch the EMC fan servo pattern with hysteresis. The default fan sensor mode is
+`auto`, which tracks the hottest readable hwmon temperature, writes
+`/run/ps5-power.fan`, and restores the default fan pattern when the service
+stops. Fan-only options include `-a <pattern>` for the default pattern,
+`-C <pattern>` for the cool pattern, and `-f <pattern>` for one-shot forcing.
+With the default `FAN_ENABLED=0`, keep your normal fan policy service running.
+If you set `FAN_ENABLED=1`, stop/disable other fan policy daemons such as
+`ps5fan.service` so only one process owns `/dev/icc` fan control.
 
 ## Undo / restore defaults
 ```sh
