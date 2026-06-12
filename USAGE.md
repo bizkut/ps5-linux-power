@@ -16,8 +16,8 @@ Also: don't run the module CLIs (`../ps5_cpu` etc.), `ps5boost`, or two of these
 tools at the same time. The PoC tools serialize against *each other* via an
 `flock`, but not against the kernel modules.
 
-Fan control is intentionally separate from `ps5gov`/`ps5_boost` and is handled by
-`ps5fan` on this platform.
+Fan control is handled by `ps5gov` by default on this platform. Stop older
+standalone fan services before testing these tools directly.
 
 ## Build
 ```sh
