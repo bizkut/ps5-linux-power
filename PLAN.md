@@ -4,13 +4,86 @@ This repo is now a userspace power-control PoC with systemd integration. The
 remaining plan is mostly about validation and deciding whether the mailbox path
 should stay in userspace or move behind a kernel-owned interface.
 
+## New agent handoff
+
+Start here if taking over this thread.
+
+Current local repo state:
+
+- Branch: `main`.
+- Latest commit: `d9c3955 governors: default to gaming performance policy`.
+- Working tree has only generated/external untracked files:
+  `cyan-skillfish-governor/`, built binaries, `dkms/ps5-icc-fan/ps5_fanctl`,
+  and `governors/profile_throttle_curves.sh`.
+- Do not stage generated binaries or the Cyan checkout unless deliberately
+  adopting them.
+
+PS5 target:
+
+- SSH: `steam@10.0.1.41`.
+- Test tree: `/home/steam/ps5-linux-cpuclock-test`.
+- Installed service uses `/usr/local/lib/ps5-linux-cpuclock` and
+  `/etc/systemd/system/ps5gov.service`.
+- `ps5gov.service` is installed, enabled, and active after reboot.
+- `ps5boost.service` and `ps5fan.service` are inactive; `ps5gov.service`
+  conflicts with both.
+- Current default policy is gaming-focused:
+  - `PROFILE=performance`
+  - `CPU_ARGS="-i 250 -d 6 -H 25 -M 12 -L 4"`
+  - `GPU_ARGS="-P performance"`
+  - `FAN_ENABLED=1`
+  - `FAN_ARGS="-i 3000 -H 55 -L 45 -s auto"`
+- `ps5_icc_fan` has been built/loaded successfully and `/dev/ps5-fan` works.
+
+Validated on target:
+
+- Native build works with the kernel UAPI include fallback.
+- GPU id is `0x13fb`.
+- Idle governor state steps down: CPU around P5/1600 MHz, GPU target 1200 MHz,
+  boost `0x0`.
+- Headless CPU load (`openssl speed -multi 16`) ramps CPU to P0/3200 and boost
+  to `0x1`.
+- `ps5govctl restore` stops the service, clears boost, restores CPU/GPU, restores
+  fan pattern 0, and service can be restarted.
+- Reboot recovery is clean: after reboot, exactly one CPU/GPU/fan governor
+  process is running and boost is `0x0`.
+- DKMS fan read-only checks work: zone temp, mode get, servo get.
+- Conservative fan writes work: pattern `0`, pattern `1`, target-temp `58`,
+  restore pattern `0`.
+- Staged fan curve test worked once: stage 3 around 65C, stage 2 around 61C,
+  restore pattern 0 on exit.
+- Root `ps5gov-trace.sh` captures EMC zones, CPU/GPU/fan state, and boost.
+
+Important caveats:
+
+- GPU ramp validation is still pending. SSH tests with `vkcube --wsi display`
+  failed without a display, and `gamescope --backend headless -- vkcube` launched
+  Vulkan but did not produce fdinfo-visible `drm-engine-gfx` load for the current
+  GPU sampler.
+- A real game or fdinfo-visible benchmark session is needed before marking GPU
+  moving-target defaults, boost behavior, and thermal cap behavior validated.
+- After changing script defaults, use `systemctl restart ps5gov`, not only
+  `systemctl reload ps5gov`; reload keeps the existing parent shell process.
+
+Next best work:
+
+- Capture 15-30 minute root traces during a real game or fdinfo-visible GPU
+  benchmark:
+  `sudo ps5gov-trace.sh -d 1800 -i 1`.
+- Check GPU load/current/target/desired MHz, boost state, EMC zones, fan pattern,
+  and subjective fan noise from those traces.
+- Tune the default fan curve only after those real gaming traces exist.
+- If no fdinfo-visible workload can be produced, revisit GPU load sampling:
+  fdinfo vs safer libdrm/kernel path vs Cyan-style busy sampling.
+
 ## Current state
 
 - [x] One-shot tools for CPU P-state, DF P-state, GPU GFXCLK, and MP1 boost.
 - [x] CPU/GPU load-adaptive governors.
 - [x] systemd service and install target.
 - [x] `/etc/ps5-linux-cpuclock/ps5gov.conf` config file.
-- [x] `auto`, `quiet`, `balanced`, and `performance` profiles.
+- [x] `auto`, `quiet`, `balanced`, and `performance` profiles, with
+      `performance` as the default gaming profile.
 - [x] `ps5govctl` for profile switching, config inspection, sensors, restore,
       restart, and boost recovery.
 - [x] Shared boost-vote state so CPU and GPU governors do not fight each other.
@@ -30,10 +103,17 @@ should stay in userspace or move behind a kernel-owned interface.
       service can use concise profile selection while preserving manual tuning.
 - [x] GPU frequency range limits, matching Cyan's configurable min/max policy
       concept while keeping PS5-safe defaults.
+- [x] Runtime high-performance override inspired by Cyan's D-Bus performance
+      mode, implemented as a dependency-free `/run/ps5-power.performance` switch
+      controlled by `ps5govctl performance on|off|status`.
+- [x] Deferred Cyan's direct D-Bus service and voltage/safe-point table for now:
+      D-Bus adds packaging/dependency surface, and voltage points are not PS5
+      validated.
 
 ## Safety policy
 
-- [x] Do not run alongside `ps5boost.service`; `ps5gov.service` conflicts with it.
+- [x] Do not run alongside `ps5boost.service` or `ps5fan.service`;
+      `ps5gov.service` conflicts with both.
 - [x] Keep DF out of the automatic governor.
 - [x] Require `force` for direct DF/GPU writes.
 - [x] Validate governor thresholds, intervals, down-counts, load method, and
@@ -51,12 +131,20 @@ should stay in userspace or move behind a kernel-owned interface.
       better long-term fan path than simple userspace pattern toggling.
 - [x] Align `ps5_fan_gov` with the current kernel `/dev/icc` UAPI:
       `ICC_FAN_CHANGE_SERVO_PATTERN` (`_IOW('I', 1, u8)`).
+- [x] Make `ps5_fan_gov` prefer the optional DKMS `/dev/ps5-fan` UAPI and fall
+      back to the legacy `/dev/icc` pattern ioctl.
+- [x] Add optional staged fan curve support to `ps5_fan_gov`:
+      `temp_up:target_temp:servo_pattern` with hysteresis.
 
 ## ps5-emc-re fan findings
 
-`/Users/bizkut/Downloads/PS5/Linux/ps5-emc-re` shows that fan control should
-eventually be EMC/ICC auto-servo control, not just `/dev/icc` servo-pattern
-toggling:
+Fan EMC/ICC references:
+
+- Upstream research: `https://github.com/c0w-ar/ps5-emc-re`
+- Local checkout used here: `/Users/bizkut/Downloads/PS5/Linux/ps5-emc-re`
+
+That research shows fan control should eventually be EMC/ICC auto-servo control,
+not just `/dev/icc` servo-pattern toggling:
 
 - Fan service is `ICC_SERVICE_ID_FAN = 0x0a`.
 - Thermal service is `ICC_SERVICE_ID_THERMAL = 0x0b`.
@@ -75,52 +163,160 @@ toggling:
 - First writable servo settings:
   - target temperature, P gain, I gain, I limit, U limit, D limit.
 
-Preferred direction:
+Implemented direction:
 
 - Current userspace `/dev/icc` only exposes `ICC_FAN_CHANGE_SERVO_PATTERN`
   (`_IOW('I', 1, u8)`), so `ps5_fan_gov` now treats `-f`, default, and cool
   choices as servo pattern numbers rather than a true fan on/off switch.
-- Keep `ps5_fan_gov` temperature hysteresis as a simple failsafe/manual pattern
-  policy.
-- Add a kernel-owned safe fan UAPI for EMC fan mode, zone temperature, servo
-  status, and target-temperature updates.
-- Prefer EMC `AUTO` mode plus target-temperature tuning over userspace fan
-  pattern loops.
+- `ps5_fan_gov` keeps simple two-state temperature hysteresis as the default
+  failsafe/manual pattern policy.
+- Optional staged fan curves are supported with
+  `temp_up:target_temp:servo_pattern` points and hysteresis.
+- The optional `ps5-icc-fan` DKMS module exposes a curated `/dev/ps5-fan` UAPI
+  for EMC fan mode, zone temperature, servo status, servo pattern, and
+  target-temperature updates when the target kernel exports `icc_query()`.
+- When `/dev/ps5-fan` exists, `ps5_fan_gov` applies both EMC target temperature
+  and servo pattern for curve stages. Without it, it falls back to legacy
+  `/dev/icc` servo-pattern control.
+- Prefer EMC `AUTO` mode plus target-temperature tuning over raw userspace fan
+  pattern loops once real hardware traces confirm behavior.
 - Treat P/I/limit servo writes as experimental until measured on real hardware;
   target temperature is the first setting worth testing.
 - Do not expose a raw generic ICC query interface by default; expose curated fan
   operations so userspace cannot accidentally send power/shutdown/unknown ICC
   messages.
 
+## Fan curve design
+
+Goal: keep the default fan policy enabled and gaming-oriented, while allowing
+opt-in staged temperature curves for target-side tuning. The default service
+starts `ps5_fan_gov`, keeps the default servo pattern below 55 C, switches to the
+cool pattern at 55 C, and restores the default pattern below 45 C. Curve stages
+drive EMC target temperature when `/dev/ps5-fan` is available and fall back to
+servo-pattern selection when only legacy `/dev/icc` is available.
+
+Implemented config shape:
+
+```sh
+FAN_CURVE="45:62:0,50:58:0,58:55:1,65:52:1,72:48:1"
+FAN_HYSTERESIS=4
+```
+
+Each point is:
+
+```text
+temp_up_c:target_temp_c:servo_pattern
+```
+
+Provisional staged curve:
+
+| Stage | Up C | Down C | Servo pattern | EMC target C |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | default | default | 0 | 62 |
+| 1 | 50 | 46 | 0 | 58 |
+| 2 | 58 | 54 | 1 | 55 |
+| 3 | 65 | 61 | 1 | 52 |
+| 4 | 72 | 68 | 1 | 48 |
+
+Those numbers are provisional starting points, not measured PS5 fan truth. They
+come from conservative policy assumptions and existing repo defaults:
+
+- Existing `ps5_fan_gov` default hysteresis is `-H 58 -L 48`.
+- Existing GPU thermal policy starts reacting around `75..85C`.
+- The draft keeps normal control below the GPU throttle range and uses 4C
+  hysteresis to avoid oscillation.
+
+Validation required before making this default:
+
+- Record idle desktop, game load, and sustained benchmark traces on real PS5
+  hardware.
+- Compare hottest hwmon temperature with DKMS EMC zone temperatures.
+- Confirm which servo pattern numbers map to default/cool/max behavior.
+- Confirm target-temp writes affect EMC auto-servo behavior predictably.
+- Adjust curve points from measured temperature/noise/performance data.
+
 ## Real PS5 validation checklist
 
-- [ ] `make clean && make` on the target custom kernel image.
-- [ ] `sudo make install-systemd && sudo systemctl daemon-reload`.
-- [ ] `sudo systemctl disable --now ps5boost`.
-- [ ] `sudo systemctl enable --now ps5gov`.
-- [ ] `ps5govctl sensors` shows `k10temp` and any GPU hwmon sensors available.
-- [ ] `cat /sys/class/drm/card*/device/device` confirms the GPU id is `0x13fb`.
-- [ ] Under idle load, CPU/GPU clocks step down and boost state remains `0x0`.
-- [ ] Under game/benchmark load, CPU/GPU ramp up and boost state becomes non-zero.
+- [x] `make clean && make` on the target custom kernel image.
+- [x] `sudo make install-systemd && sudo systemctl daemon-reload`.
+- [x] `sudo systemctl disable --now ps5boost`; target shows inactive.
+- [x] `sudo systemctl enable --now ps5gov`; target shows active/enabled.
+- [x] `ps5govctl sensors` runs on target through the smoke script.
+- [x] `cat /sys/class/drm/card*/device/device` confirms the GPU id is `0x13fb`.
+- [x] Under idle load, CPU/GPU clocks step down and boost state remains `0x0`
+      on target; observed CPU P5/1600 MHz and GPU 1200 MHz.
+- [x] Under headless CPU benchmark load, CPU ramps up and boost state becomes
+      non-zero; `openssl speed -multi 16` drove CPU from P5/1600 to P0/3200 and
+      boost state to `0x1`.
+- [ ] Under a GPU-visible game/benchmark session, GPU ramps up and boost state
+      becomes non-zero. SSH attempts with `vkcube --wsi display` failed without a
+      display, and `gamescope --backend headless -- vkcube` launched Vulkan but
+      did not produce fdinfo-visible GPU load for the governor.
 - [ ] At high temperature, boost is cleared and GPU cap falls in stages.
-- [ ] `sudo ps5govctl restore` stops the service and restores CPU P0/GPU 2000.
-- [ ] Reboot recovery is clean: service starts only once and no stale boost state
-      remains after stop/start cycles.
+- [x] `sudo ps5govctl restore` stops the service and restores CPU P0/GPU 2000;
+      verified boost `0x0`, CPU P0 request, GPU reset to 2000, fan pattern 0,
+      then restarted `ps5gov.service`.
+- [x] Reboot recovery is clean: service starts only once and no stale boost state
+      remains after stop/start cycles. Verified after reboot: `ps5gov.service`
+      active/enabled, `ps5boost.service` and `ps5fan.service` inactive, boost
+      `0x0`, and exactly one CPU/GPU/fan governor process.
+- [x] `grep ' icc_query$' /proc/kallsyms` confirms the target kernel can support
+      the optional `ps5-icc-fan` DKMS module.
+- [x] `make -C dkms/ps5-icc-fan` succeeds on the target kernel.
+- [x] `sudo insmod ps5_icc_fan.ko` creates `/dev/ps5-fan`.
+- [x] `sudo ps5_fanctl temp 0`, `mode-get 0`, and `servo 0` return sane data
+      before any fan writes are tested.
+- [x] Conservative fan writes passed on target: pattern `0`, pattern `1`,
+      MAINSOC target-temp `58`, then restore pattern `0`.
+- [x] `ps5gov.service` now conflicts with `ps5fan.service`; target restart left
+      `ps5fan.service` inactive while ps5gov fan control was active.
 
 ## Next engineering steps
 
-- [ ] Add runtime profile/range changes without restarting the service.
 - [x] Add structured GPU status output under `/run/ps5-power.gpu`.
 - [x] Add structured CPU status output under `/run/ps5-power.cpu`.
-- [ ] Add optional logging rate limits for verbose mode.
+- [x] Add optional logging rate limits for verbose hold messages.
 - [x] Add a target-side smoke test script for install, config, sensors, restore,
       and service lifecycle checks.
-- [ ] Add a target-side fan validation script that compares EMC auto/target-temp
-      behavior against forced fan servo patterns once the safe fan UAPI exists.
-- [ ] Prototype kernel-side fan operations from `ps5-emc-re`: mode get/set, zone
-      temperature get, servo current settings get, and MAINSOC target-temp set.
-- [ ] Validate GPU moving-target defaults against idle desktop, game load, and
+- [x] Add a target-side DKMS fan validation script for symbol, module/device,
+      read-only ioctl, and optional write checks.
+- [x] Add a target-side trace capture script for fan/GPU tuning CSVs:
+      service state, hottest hwmon temperature, optional EMC zone temperatures,
+      CPU/GPU/fan runtime state, and boost state.
+- [x] Add service-level reload for runtime profile/range changes without a full
+      systemd restart; reload re-reads config and replaces child governors.
+- [x] Add a target-side fan validation script that compares EMC auto/target-temp
+      behavior against forced fan servo patterns after the DKMS UAPI is validated
+      on real hardware.
+- [x] Prototype DKMS fan module operations from `ps5-emc-re`: mode get/set, zone
+      temperature get, servo current settings get, servo pattern set, and
+      MAINSOC target-temp set.
+
+## Next target-side validation
+
+- [x] Build/load `ps5-icc-fan` module on real PS5 Linux and confirm
+      `/dev/ps5-fan` works.
+- [x] Run read-only fan checks first: zone temperature, mode get, servo get.
+- [x] Test conservative write operations: pattern `0`, pattern `1`,
+      target-temp `58`, then restore pattern `0`.
+- [x] Run one staged curve test with conservative thresholds; on target it
+      initialized at stage 3 around 65C, stepped down to stage 2 around 61C, and
+      restored pattern 0 on exit.
+- [x] Capture a short headless CPU benchmark trace with:
+      hottest hwmon temp, EMC zone temp, CPU clocks, boost state, and fan state.
+- [ ] Capture GPU-visible game load and sustained benchmark traces with:
+      hottest hwmon temp, EMC zone temp, CPU/GPU clocks, boost state, fan state,
+      and subjective fan noise.
+- [x] Use `ps5gov-trace.sh` for short tuning runs with EMC zones, CPU/GPU clocks,
+      boost, and fan state. Verified 10-second root trace on target.
+- [ ] Run longer 15-30 minute traces under game/benchmark load.
+- [ ] Validate GPU moving-target defaults against an fdinfo-visible game load and
       sustained benchmark traces on real PS5 hardware.
+- [ ] Validate provisional fan curve points and adjust from measured trace data;
+      do not promote the curve to default until this is done.
+
+## Next implementation work
+
 - [ ] Decide whether GPU busy sampling should stay fdinfo-based or move to a
       safer kernel/libdrm path for Cyan-style busy sampling.
 - [ ] If this becomes more than a PoC, move all SMN mailbox transactions behind a

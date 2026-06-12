@@ -97,8 +97,10 @@ This builds:
 - `governors/ps5_gpu_gov`
 - `governors/ps5_fan_gov`
 
-No kernel headers are required. The repo carries small fallback UAPI headers for
-stripped/custom PS5 Linux images.
+The repo carries small fallback UAPI headers for stripped/custom PS5 Linux
+images. If the target's libc headers are missing Linux UAPI pieces such as
+`linux/errno.h`, the Makefiles automatically add
+`/lib/modules/$(uname -r)/build/include/uapi` when it exists.
 
 ## Manual Tools
 
@@ -195,10 +197,10 @@ Built-in profiles:
 - `balanced`
 - `performance`
 
-`auto` is the default service profile. It currently uses the balanced CPU policy
-and the GPU governor's `-P auto` preset, which is an alias for `balanced`; the
-name is reserved so it can become truly adaptive later without changing user
-config.
+`performance` is the default service profile because this repo is tuned first for
+gaming. `auto` currently uses the balanced CPU policy and the GPU governor's
+`-P auto` preset, which is an alias for `balanced`; the name is reserved so it
+can become truly adaptive later without changing user config.
 
 The GPU preset can still be narrowed with `GPU_ARGS`, including `-n <MHz>` and
 `-x <MHz>` for a requested min/max GPU target range. Runtime CPU/GPU governor
@@ -208,10 +210,10 @@ state is written to `/run/ps5-power.cpu` and `/run/ps5-power.gpu`, then shown by
 Profile summary:
 
 | Profile | CPU policy | GPU policy |
-| `auto` | balanced defaults | `-P auto` |
+| `auto` | reserved adaptive profile, currently balanced policy | `-P auto` |
 | `quiet` | slower sampling, higher load thresholds | `-P quiet` |
-| `balanced` | default daily profile | `-P balanced` |
-| `performance` | faster sampling, lower load thresholds | `-P performance` |
+| `balanced` | lower-power daily profile | `-P balanced` |
+| `performance` | default gaming profile, faster sampling, lower load thresholds | `-P performance` |
 
 Common operations:
 
@@ -220,11 +222,25 @@ sudo ps5govctl profile quiet
 sudo ps5govctl profile balanced
 sudo ps5govctl profile performance
 sudo ps5govctl profile auto
+sudo ps5govctl performance on
+sudo ps5govctl performance off
+ps5govctl performance status
+sudo ps5govctl reload
 ps5govctl config
 ps5govctl sensors
 sudo ps5govctl stop-boost
 sudo ps5govctl restore
 ```
+
+`profile` writes `/etc/ps5-linux-cpuclock/ps5gov.conf` and reloads the running
+service. Reload keeps the parent service process alive, re-reads config, and
+replaces the CPU/GPU/fan child governors with freshly merged arguments. Use
+`restart` when you want a full systemd stop/start.
+
+`performance on` is a Cyan-style runtime override. It writes
+`/run/ps5-power.performance`, reloads the service, and forces the `performance`
+profile without rewriting persistent config. `performance off` clears the
+override and reloads back to the configured profile.
 
 `restore` stops the governor service, clears boost, restores CPU P0, and resets
 GPU GFXCLK to 2000 MHz.
@@ -248,18 +264,53 @@ sudo governors/ps5gov-smoke.sh --service
 `--service` reloads systemd, restarts `ps5gov.service`, reads sensors, then runs
 `ps5govctl restore` to stop the service and restore CPU/GPU defaults.
 
+For target-side tuning traces:
+
+```sh
+governors/ps5gov-trace.sh -d 300 -i 1
+```
+
+The trace CSV records hottest hwmon temperature, optional EMC zone temperatures
+from `/dev/ps5-fan`, CPU/GPU/fan runtime state, boost state, and service state.
+Run it as root, or make `/dev/ps5-fan` readable, if you want EMC zone columns
+instead of `?`.
+For GPU governor validation, use a game or benchmark session that shows
+fdinfo-visible `drm-engine-gfx` activity; headless `gamescope -- vkcube` launched
+Vulkan on the PS5 test target but did not produce governor-visible GPU load.
+
+For DKMS fan behavior validation, run read-only checks first:
+
+```sh
+governors/ps5gov-fan-validate.sh
+```
+
+After `/dev/ps5-fan` reads are sane, gated writes can compare default/cool servo
+patterns and MAINSOC target-temperature behavior:
+
+```sh
+sudo governors/ps5gov-fan-validate.sh --write-tests
+```
+
 ## Fan Policy
 
 Fan control is intentionally separate from CPU/GPU clock control.
+The EMC fan mode/servo direction is based on the public PS5 EMC reverse
+engineering notes at `https://github.com/c0w-ar/ps5-emc-re`.
 
 `ps5gov.conf` defaults to:
 
 ```text
-FAN_ENABLED=0
+FAN_ENABLED=1
+FAN_ARGS="-i 3000 -H 55 -L 45 -s auto"
 ```
 
-Enable fan governor testing only when you explicitly want this service to own fan
-policy. Do not run multiple fan policy daemons at the same time.
+That starts the fan governor by default but keeps the default EMC servo pattern
+active below 55 C. At 55 C it switches to the cool pattern, then returns to the
+default pattern after temperature falls below 45 C. Do not run multiple fan
+policy daemons at the same time; `ps5gov.service` conflicts with
+`ps5fan.service` for this reason.
+If an older config file omits `FAN_ENABLED`, the service still defaults to
+enabled.
 
 When `FAN_ENABLED=1`, `ps5_fan_gov` uses hysteresis (`-H` high temperature,
 `-L` low temperature) to switch the EMC fan servo pattern exposed by the current
@@ -267,6 +318,29 @@ When `FAN_ENABLED=1`, `ps5_fan_gov` uses hysteresis (`-H` high temperature,
 temperature, writes structured state to `/run/ps5-power.fan`, restores the
 default pattern on normal exit, and fails safe to the cool pattern after repeated
 sensor read errors.
+
+For richer EMC fan control without patching kernel source, see the optional DKMS
+module in `dkms/ps5-icc-fan`. It exposes a curated `/dev/ps5-fan` interface for
+fan mode, thermal zone temperature, servo status, servo pattern, and target
+temperature. It requires the target kernel to export `icc_query()`; check with:
+
+```sh
+grep ' icc_query$' /proc/kallsyms
+```
+
+When `/dev/ps5-fan` exists, `ps5_fan_gov` uses it for servo pattern changes and
+falls back to the older `/dev/icc` pattern ioctl otherwise.
+
+Fan curves are optional and provisional until tuned on real hardware:
+
+```sh
+FAN_CURVE="45:62:0,50:58:0,58:55:1,65:52:1,72:48:1"
+FAN_HYSTERESIS=4
+```
+
+Each point is `temp_up:target_temp:servo_pattern`. With `/dev/ps5-fan`, the
+governor sets EMC target temperature plus the servo pattern. Without it, the
+curve still controls servo pattern only.
 
 ## Production Driver Direction
 

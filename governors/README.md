@@ -26,10 +26,12 @@ cd governors
 sudo ./ps5_cpu_gov -i 400 -d 4   # CPU: load >=40%->P0, >=20%->P2, >=8%->P5, else P7
 sudo ./ps5_gpu_gov -P auto
 ```
-Options: `-i <ms>` interval, `-d <n>` low-samples before one step down, `-v` verbose.
+Options: `-i <ms>` interval, `-d <n>` low-samples before one step down,
+`-v` verbose, `-q <n>` verbose hold-log interval.
 Load thresholds: `-H <percent>` high, `-M <percent>` mid, `-L <percent>` low.
 GPU-only: `-P auto|quiet|balanced|performance` selects a built-in preset.
-`auto` currently aliases `balanced` and is the default service profile.
+`performance` is the default service profile for gaming; `auto` currently aliases
+`balanced`.
 `-A <MHz>` significant-change threshold, `-U <MHz>` normal ramp step,
 `-b <MHz>` burst ramp step, `-B <n>` high-load samples before burst,
 `-n <MHz>` minimum GPU target, `-x <MHz>` maximum GPU target,
@@ -53,7 +55,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ps5gov
 ```
 The unit requires `/dev/mp1` for boost control and conflicts with
-`ps5boost.service`; use one MP1 power policy owner at a time.
+`ps5boost.service` and `ps5fan.service`; use one MP1 power policy owner and one
+fan policy owner at a time.
 
 Profiles:
 ```sh
@@ -61,6 +64,10 @@ sudo ps5govctl profile quiet
 sudo ps5govctl profile balanced
 sudo ps5govctl profile performance
 sudo ps5govctl profile auto
+sudo ps5govctl performance on
+sudo ps5govctl performance off
+ps5govctl performance status
+sudo ps5govctl reload
 ps5govctl config
 ```
 
@@ -73,9 +80,13 @@ Built-in profiles:
 | `balanced` | `-i 400 -d 4 -H 40 -M 20 -L 8` | `-P balanced` |
 | `performance` | `-i 250 -d 6 -H 25 -M 12 -L 4` | `-P performance` |
 
-`auto` is the default service profile. It currently aliases `balanced` for the
-GPU preset and uses the balanced CPU policy; the name is reserved for future
-adaptive selection without changing user config.
+`performance` is the default service profile because this repo is tuned first for
+gaming. `auto` currently aliases `balanced` for the GPU preset and uses the
+balanced CPU policy; the name is reserved for future adaptive selection without
+changing user config.
+`performance on` is a Cyan-style runtime override backed by
+`/run/ps5-power.performance`; it forces the performance profile until
+`performance off` reloads the service back to the configured profile.
 
 The CPU and GPU governors write structured runtime state to
 `/run/ps5-power.cpu` and `/run/ps5-power.gpu`. `ps5govctl sensors` prints this
@@ -86,9 +97,12 @@ cap, and burst state.
 Manual config:
 ```sh
 sudoedit /etc/ps5-linux-cpuclock/ps5gov.conf
-sudo systemctl restart ps5gov
+sudo systemctl reload ps5gov
 ```
-Precedence is: systemd environment override, config file, then built-in profile
+Reload keeps the parent `ps5gov.service` process alive, re-reads the config, and
+replaces the CPU/GPU/fan child governors with freshly merged arguments. Use
+`sudo systemctl restart ps5gov` only when you need a full service restart.
+Precedence is: explicit process environment, config file, then built-in profile
 defaults.
 
 Useful GPU options:
@@ -102,27 +116,57 @@ Target smoke checks:
 ```sh
 ./ps5gov-smoke.sh
 sudo ./ps5gov-smoke.sh --service
+./ps5gov-trace.sh -d 300 -i 1
+./ps5gov-fan-validate.sh
+sudo ./ps5gov-fan-validate.sh --write-tests
 ```
 Default mode checks local binaries, scripts, config rendering, and sensor output.
 `--service` performs the root-only systemd restart/sensors/restore lifecycle.
+The trace script writes a CSV for fan/GPU tuning with hwmon temperature, optional
+EMC zone temperatures, CPU/GPU/fan state, boost state, and service state.
+Run it as root, or make `/dev/ps5-fan` readable, to capture EMC zone
+temperatures.
+GPU ramp validation needs an fdinfo-visible game or benchmark workload; headless
+`gamescope -- vkcube` did not exercise the current fdinfo sampler on the PS5 test
+target.
+The fan validation script runs read-only `/dev/ps5-fan` checks by default;
+`--write-tests` is gated and compares default/cool pattern and target-temp writes.
 
 ## Fan governor
 
-Fan control is opt-in through `FAN_ENABLED=1`. With the default `FAN_ENABLED=0`,
-keep the normal platform fan policy service running. If `FAN_ENABLED=1`, stop
-other fan policy daemons such as `ps5fan.service` so only one process owns
-`/dev/icc` fan control. The default fan args are:
+The EMC fan mode/servo details are based on the public PS5 EMC reverse
+engineering notes at `https://github.com/c0w-ar/ps5-emc-re`.
+
+Fan control is enabled by default through `FAN_ENABLED=1`. Stop other fan policy
+daemons such as `ps5fan.service` so only one process owns `/dev/icc` fan control.
+The default fan args are:
 ```sh
-FAN_ARGS="-i 3000 -H 58 -L 48 -s auto"
+FAN_ARGS="-i 3000 -H 55 -L 45 -s auto"
 ```
+If an older config file omits `FAN_ENABLED`, `run-governors.sh` still defaults to
+enabled.
 
 `ps5_fan_gov` switches the EMC fan servo pattern exposed by `/dev/icc` with
 hysteresis. `-H` is the temperature that selects the cool pattern; `-L` is the
-lower temperature that restores the default pattern. `-a <pattern>` sets the
+lower temperature that restores the default pattern. With the defaults, pattern 0
+stays active below 55 C, pattern 1 is selected at 55 C, and pattern 0 is restored
+below 45 C. `-a <pattern>` sets the
 default pattern, `-C <pattern>` sets the cool pattern, and `-f <pattern>` forces
 one pattern once. `-s auto` tracks the hottest readable hwmon temperature instead
 of only `k10temp`. A named hwmon sensor or direct `/sys/.../temp*_input` path can
 still be supplied.
+`-q <n>` limits repetitive verbose `hold` messages while preserving immediate
+toggle/failsafe/restore logs.
+
+Optional staged fan curve:
+```sh
+FAN_CURVE="45:62:0,50:58:0,58:55:1,65:52:1,72:48:1"
+FAN_HYSTERESIS=4
+```
+Each point is `temp_up:target_temp:servo_pattern`. With the DKMS `/dev/ps5-fan`
+device, curve stages set EMC target temperature and servo pattern. Without it,
+the governor still uses the curve's servo pattern through legacy `/dev/icc`.
+The example curve is provisional and must be tuned from real PS5 traces.
 
 The fan governor writes structured state to `/run/ps5-power.fan`; `ps5govctl
 sensors` prints it with a `fan_state_` prefix. On normal exit it restores the

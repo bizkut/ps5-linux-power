@@ -74,10 +74,12 @@ sudo ./ps5_cpu_gov -v               # CPU only, verbose (Ctrl+C to stop)
 sudo ./ps5_gpu_gov -v -P auto       # GPU only, verbose + preset policy
 sudo ./run-governors.sh             # BOTH together (staggered intervals)
 ```
-Flags: `-i <ms>` interval, `-d <n>` low-samples before stepping down, `-v` verbose.
+Flags: `-i <ms>` interval, `-d <n>` low-samples before stepping down, `-v` verbose,
+`-q <n>` verbose hold-log interval.
 Load thresholds: `-H <percent>` high, `-M <percent>` mid, `-L <percent>` low.
 GPU-only: `-P auto|quiet|balanced|performance` selects a built-in preset.
-`auto` currently aliases `balanced` and is the default service profile.
+`performance` is the default service profile for gaming; `auto` currently aliases
+`balanced`.
 `-A <MHz>` significant-change threshold, `-U <MHz>` normal ramp step,
 `-b <MHz>` burst ramp step, `-B <n>` high-load samples before burst,
 `-n <MHz>` minimum GPU target, `-x <MHz>` maximum GPU target,
@@ -98,8 +100,14 @@ sudo ps5govctl profile quiet
 sudo ps5govctl profile balanced
 sudo ps5govctl profile performance
 sudo ps5govctl profile auto
+sudo ps5govctl performance on
+sudo ps5govctl performance off
+ps5govctl performance status
 ps5govctl config
 ```
+`performance on` is a Cyan-style runtime override: it forces the `performance`
+profile through `/run/ps5-power.performance` without rewriting the persistent
+config. `performance off` reloads back to the configured profile.
 `ps5gov.service` conflicts with `ps5boost.service`; don't run two MP1 power
 policy owners at the same time.
 
@@ -111,14 +119,18 @@ sudo governors/ps5gov-smoke.sh --service
 The default mode checks local build/config/sensor plumbing. `--service` reloads
 systemd, restarts `ps5gov.service`, reads sensors, then restores defaults.
 
-`FAN_ENABLED=1` is optional in `/etc/ps5-linux-cpuclock/ps5gov.conf` and will
-switch the EMC fan servo pattern with hysteresis. The default fan sensor mode is
+`FAN_ENABLED=1` is the default in `/etc/ps5-linux-cpuclock/ps5gov.conf` and
+switches the EMC fan servo pattern with hysteresis. The default fan sensor mode is
 `auto`, which tracks the hottest readable hwmon temperature, writes
 `/run/ps5-power.fan`, and restores the default fan pattern when the service
 stops. Fan-only options include `-a <pattern>` for the default pattern,
 `-C <pattern>` for the cool pattern, and `-f <pattern>` for one-shot forcing.
-With the default `FAN_ENABLED=0`, keep your normal fan policy service running.
-If you set `FAN_ENABLED=1`, stop/disable other fan policy daemons such as
+`-c temp:target:pattern,...` enables a staged fan curve, and `-y <C>` sets
+curve hysteresis. With `/dev/ps5-fan`, curve stages set EMC target temperature;
+without it, stages still switch servo pattern through legacy `/dev/icc`.
+With the default `FAN_ARGS="-i 3000 -H 55 -L 45 -s auto"`, the governor keeps the
+default pattern below 55 C, switches to the cool pattern at 55 C, and restores the
+default pattern below 45 C. Stop/disable other fan policy daemons such as
 `ps5fan.service` so only one process owns `/dev/icc` fan control.
 
 ## Undo / restore defaults
