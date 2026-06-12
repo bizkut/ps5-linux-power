@@ -316,12 +316,16 @@ come from conservative policy assumptions and existing repo defaults:
 Validation required before making this default:
 
 - Record idle desktop and real-game traces on real PS5 hardware. Sustained
-  benchmark traces have already been captured with `vkmark --winsys wayland`,
-  and an unattended SuperTuxKart real-game trace has been captured.
-- Compare hottest hwmon temperature with DKMS EMC zone temperatures.
+  benchmark traces have already been captured with `vkmark --winsys wayland`;
+  real-game traces have been captured with SuperTuxKart and Shadow Trial.
+- Compare hottest hwmon temperature with DKMS EMC zone temperatures. Existing
+  traces include both hwmon and EMC zones; Shadow Trial reached 84 C hwmon and
+  EMC zones up to 83.25 C during sustained load.
 - Confirm which servo pattern numbers map to default/cool/max behavior.
 - Confirm target-temp writes affect EMC auto-servo behavior predictably.
-- Adjust curve points from measured temperature/noise/performance data.
+- Adjust curve points from measured temperature/noise/performance data. Measured
+  temperature/performance data exists; subjective fan-noise feedback is still
+  needed before deciding whether to make the curve more aggressive.
 
 ## Real PS5 validation checklist
 

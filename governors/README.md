@@ -12,8 +12,11 @@ is present. Ramp down uses hysteresis. At the top load tier they also vote for
 is high. On exit (Ctrl+C / SIGTERM) each clears its boost vote and restores full
 normal clock (CPU P0/3200, GPU 2000).
 
-GPU thermal guard is borrowed from Cyan's model: above `-T`, boost is disabled
-and the GPU is capped at 1500 MHz until temperature falls to `-R`. It reads the
+GPU thermal guard is borrowed from Cyan's model, but implemented as staged caps.
+In the default `performance` profile, `-T 90 -R 80` means the warm stage begins
+at `80 C`: boost is cleared and the normal path is limited to about `2000 MHz`.
+At `90 C`, the GPU target is capped to `1500 MHz`; at `95 C`, it is capped to
+`1200 MHz`. Below `80 C`, normal boost behavior resumes. The governor reads the
 GPU hwmon node when available and falls back to `k10temp` on PS5 kernels that do
 not expose AMDGPU temperature.
 

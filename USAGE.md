@@ -65,9 +65,11 @@ you try with `force`, but don't unless you're ready to reboot.
 Drive the clocks by load. CPU uses fixed P-state tiers; GPU uses a moving target
 frequency with burst ramping. Ramp down uses hysteresis. The governors enter
 `/dev/mp1` boost mode at the top load tier and restore normal full clock on
-Ctrl+C. The GPU governor disables boost and caps frequency above its
-thermal threshold until recovery temperature is reached. It uses GPU hwmon when
-available and falls back to `k10temp` on kernels without AMDGPU temperature.
+Ctrl+C. The GPU governor uses staged thermal caps: with the default performance
+profile, `80 C` clears boost and limits the normal path to about `2000 MHz`,
+`90 C` caps to `1500 MHz`, and `95 C` caps to `1200 MHz`; below `80 C`, normal
+boost behavior resumes. It uses GPU hwmon when available and falls back to
+`k10temp` on kernels without AMDGPU temperature.
 ```sh
 cd governors
 sudo ./ps5_cpu_gov -v               # CPU only, verbose (Ctrl+C to stop)
@@ -83,7 +85,7 @@ GPU-only: `-P auto|quiet|balanced|performance` selects a built-in preset.
 `-A <MHz>` significant-change threshold, `-U <MHz>` normal ramp step,
 `-b <MHz>` burst ramp step, `-B <n>` high-load samples before burst,
 `-n <MHz>` minimum GPU target, `-x <MHz>` maximum GPU target,
-`-T <C>` thermal cap temperature, `-R <C>` recovery temperature.
+`-T <C>` hot cap temperature, `-R <C>` recovery/warm-cap temperature.
 GPU sources: `-S auto|gpu|k10temp`, `-m fdinfo|debugfs|auto|busy`.
 The CPU and GPU governors write runtime state to `/run/ps5-power.cpu` and
 `/run/ps5-power.gpu`; `ps5govctl sensors` prints those fields with

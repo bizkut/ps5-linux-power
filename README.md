@@ -157,6 +157,23 @@ The richer `/dev/ps5-fan` interface is provided by the optional DKMS module in
 The EMC fan behavior is based on the public PS5 EMC reverse engineering work at
 <https://github.com/c0w-ar/ps5-emc-re>.
 
+## GPU Thermal Behavior
+
+In the default `performance` GPU profile, thermal protection starts before hard
+throttle temperatures:
+
+| Temperature | Governor behavior |
+| --- | --- |
+| `>= 80 C` | warm cap, clears boost and limits the normal path to about `2000 MHz` |
+| `>= 90 C` | hot cap, limits GPU target to `1500 MHz` |
+| `>= 95 C` | critical cap, limits GPU target to `1200 MHz` |
+| `< 80 C` | recovers to normal boost behavior |
+
+On this PS5, Shadow of the Tomb Raider Trial reached the warm cap during a
+30-minute benchmark trace. Manual fan target testing found `70 C` to be a good
+quiet target under that load: it held roughly `70-72 C` with GPU boost active
+and no thermal cap, while `58 C` was too loud.
+
 ## Manual Clock Tools
 
 For quick manual checks:
