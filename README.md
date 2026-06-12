@@ -207,6 +207,7 @@ Collect a tuning trace:
 
 ```sh
 sudo governors/ps5gov-trace.sh -d 300 -i 1
+sudo governors/ps5gov-trace.sh -d 1800 -i 1 -n "game scene"
 ```
 
 Validate fan behavior:
@@ -214,6 +215,15 @@ Validate fan behavior:
 ```sh
 governors/ps5gov-fan-validate.sh
 sudo governors/ps5gov-fan-validate.sh --write-tests
+```
+
+If you build the optional DKMS fan probe first, `make install-systemd` also
+installs `ps5_fanctl` under the runtime library tree so installed traces can
+include EMC zone temperatures:
+
+```sh
+make -C dkms/ps5-icc-fan userspace
+sudo make install-systemd
 ```
 
 ## Troubleshooting

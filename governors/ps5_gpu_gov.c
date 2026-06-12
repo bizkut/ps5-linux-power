@@ -108,6 +108,15 @@ static uint32_t parse_mhz_arg(const char *s)
 	return v < 0 ? 0 : (uint32_t)v;
 }
 
+static double clamp_load(double load)
+{
+	if (load < 0.0)
+		return 0.0;
+	if (load > 1.0)
+		return 1.0;
+	return load;
+}
+
 static int validate_args(const char *prog)
 {
 	if (interval_ms < 50 || down_count < 1 ||
@@ -454,7 +463,8 @@ static unsigned int mhz_diff(uint32_t a, uint32_t b)
 	return a > b ? a - b : b - a;
 }
 
-static void write_status(double load, int temp, uint32_t current, uint32_t target,
+static void write_status(double load, const char *active_load_method,
+			 unsigned long long gfx_ns, int temp, uint32_t current, uint32_t target,
 			 uint32_t desired, uint32_t min_mhz, uint32_t max_mhz,
 			 int boost, int thermal_cap, int burst)
 {
@@ -465,6 +475,9 @@ static void write_status(double load, int temp, uint32_t current, uint32_t targe
 		return;
 	fprintf(f, "preset=%s\n", preset_name);
 	fprintf(f, "load=%.3f\n", load);
+	fprintf(f, "load_method=%s\n", load_method);
+	fprintf(f, "active_load_method=%s\n", active_load_method);
+	fprintf(f, "fdinfo_gfx_ns=%llu\n", gfx_ns);
 	fprintf(f, "temperature_c=%d\n", temp);
 	fprintf(f, "current_mhz=%u\n", current);
 	fprintf(f, "target_mhz=%u\n", target);
@@ -539,6 +552,7 @@ int main(int argc, char **argv)
 		       throttle_temp, recovery_temp, temp_source, load_method);
 
 	while (!stop) {
+		const char *active_load_method = "fdinfo";
 		ts.tv_sec = interval_ms / 1000;
 		ts.tv_nsec = (long)(interval_ms % 1000) * 1000000L;
 		nanosleep(&ts, NULL);
@@ -549,13 +563,16 @@ int main(int argc, char **argv)
 		double load = 0.0;
 		if ((!strcmp(load_method, "debugfs") || !strcmp(load_method, "busy") ||
 		     !strcmp(load_method, "auto")) && read_debugfs_load(&load) == 0) {
+			active_load_method = !strcmp(load_method, "busy") ? "debugfs-busy" : "debugfs";
 			pg = sum_gfx_ns();
+			g = pg;
 		} else {
 			g = sum_gfx_ns();
 			if (g >= pg && wall > 0)
 				load = (double)(g - pg) / (double)wall;
 			pg = g;
 		}
+		load = clamp_load(load);
 		pt = t;
 
 		if (load >= up_high)
@@ -618,16 +635,16 @@ int main(int argc, char **argv)
 				boost_on = 1;
 				boost_changed = 1;
 				if (verbose)
-					printf("gpu event=boost_on load=%.0f%% temp=%dC target=%u thermal_cap=%d burst=%d\n",
-					       load * 100, temp, target_mhz, thermal_cap, burst);
+					printf("gpu event=boost_on load=%.0f%% load_method=%s temp=%dC target=%u thermal_cap=%d burst=%d\n",
+					       load * 100, active_load_method, temp, target_mhz, thermal_cap, burst);
 			}
 		} else if (!need_boost && boost_on) {
 			if (smn_boost_vote(SMN_BOOST_GPU, 0) == 0) {
 				boost_on = 0;
 				boost_changed = 1;
 				if (verbose)
-					printf("gpu event=boost_off load=%.0f%% temp=%dC target=%u thermal_cap=%d burst=%d\n",
-					       load * 100, temp, target_mhz, thermal_cap, burst);
+					printf("gpu event=boost_off load=%.0f%% load_method=%s temp=%dC target=%u thermal_cap=%d burst=%d\n",
+					       load * 100, active_load_method, temp, target_mhz, thermal_cap, burst);
 			}
 		}
 
@@ -636,18 +653,18 @@ int main(int argc, char **argv)
 		if ((cur_mhz != target_mhz && (meaningful || burst || hit_bound)) || boost_changed) {
 			if (set_gfx(target_mhz) == 0) {
 				if (verbose)
-					printf("gpu event=clock load=%.0f%% temp=%dC from=%u to=%u desired=%u boost=%d thermal_cap=%d burst=%d\n",
-					       load * 100, temp, cur_mhz, target_mhz, desired_mhz,
+					printf("gpu event=clock load=%.0f%% load_method=%s temp=%dC from=%u to=%u desired=%u boost=%d thermal_cap=%d burst=%d\n",
+					       load * 100, active_load_method, temp, cur_mhz, target_mhz, desired_mhz,
 					       boost_on, thermal_cap, burst);
 				cur_mhz = target_mhz;
 			}
 		} else if (verbose && ++hold_logs >= log_every) {
 			hold_logs = 0;
-			printf("gpu event=hold load=%.0f%% temp=%dC current=%u target=%u desired=%u boost=%d thermal_cap=%d burst=%d\n",
-			       load * 100, temp, cur_mhz, target_mhz, desired_mhz,
+			printf("gpu event=hold load=%.0f%% load_method=%s temp=%dC current=%u target=%u desired=%u boost=%d thermal_cap=%d burst=%d\n",
+			       load * 100, active_load_method, temp, cur_mhz, target_mhz, desired_mhz,
 			       boost_on, thermal_cap, burst);
 		}
-		write_status(load, temp, cur_mhz, target_mhz, desired_mhz, min_mhz,
+		write_status(load, active_load_method, g, temp, cur_mhz, target_mhz, desired_mhz, min_mhz,
 			     max_mhz, boost_on, thermal_cap, burst);
 	}
 

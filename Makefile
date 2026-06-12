@@ -41,6 +41,10 @@ install: all
 	$(INSTALL) -m 0755 $(TOOLS) $(DESTDIR)$(LIBDIR)/
 	$(INSTALL) -m 0755 governors/ps5govctl $(DESTDIR)$(BINDIR)/ps5govctl
 	$(MAKE) -C governors install DESTDIR="$(DESTDIR)" PREFIX="$(PREFIX)" LIBDIR="$(LIBDIR)"
+	@if [ -x dkms/ps5-icc-fan/ps5_fanctl ]; then \
+		$(INSTALL) -d $(DESTDIR)$(LIBDIR)/dkms/ps5-icc-fan; \
+		$(INSTALL) -m 0755 dkms/ps5-icc-fan/ps5_fanctl $(DESTDIR)$(LIBDIR)/dkms/ps5-icc-fan/ps5_fanctl; \
+	fi
 
 install-systemd: install
 	$(INSTALL) -d $(DESTDIR)$(CONFIGDIR)

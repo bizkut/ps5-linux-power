@@ -35,6 +35,7 @@ sudo dkms add -m ps5-icc-fan -v 0.1.0
 sudo dkms build -m ps5-icc-fan -v 0.1.0
 sudo dkms install -m ps5-icc-fan -v 0.1.0
 sudo modprobe ps5_icc_fan
+printf 'ps5_icc_fan\n' | sudo tee /etc/modules-load.d/ps5-icc-fan.conf
 ```
 
 ## Verify

@@ -12,11 +12,36 @@ Current local repo state:
 
 - Branch: `main`.
 - Latest commit: `d9c3955 governors: default to gaming performance policy`.
-- Working tree has only generated/external untracked files:
-  `cyan-skillfish-governor/`, built binaries, `dkms/ps5-icc-fan/ps5_fanctl`,
-  and `governors/profile_throttle_curves.sh`.
-- Do not stage generated binaries or the Cyan checkout unless deliberately
-  adopting them.
+- Working tree has source/doc changes that expose GPU load-sampler diagnostics:
+  `PLAN.md`, `governors/README.md`, `governors/ps5_gpu_gov.c`, and
+  `governors/ps5gov-trace.sh`.
+- `ps5_gpu_gov` also clamps computed load to `0.0..1.0`; sustained `vkmark`
+  showed summed fdinfo counters can report above 100% when multiple DRM fdinfo
+  entries overlap.
+- Local validation after those changes:
+  `sh -n governors/ps5gov-trace.sh`, `make`, `governors/ps5gov-smoke.sh`, then
+  `make clean`.
+- This checkout is on the PS5 target itself; target deployment can be done
+  locally with `make` and `sudo make install-systemd`.
+- Installed locally on the PS5 target with `sudo -n make install-systemd`.
+  `ps5boost.service` and `ps5fan.service` were disabled/stopped, and
+  `ps5gov.service` was enabled/started.
+- Installed lightweight benchmark packages for target validation:
+  `mesa-utils`, `vulkan-tools`, and `vkmark`.
+- Installed `ps5-icc-fan` through DKMS on the target and loaded
+  `ps5_icc_fan`; `/dev/ps5-fan` exists after `modprobe`.
+- Added `/etc/modules-load.d/ps5-icc-fan.conf` so `ps5_icc_fan` loads after
+  reboot. Verified by unloading the module, running
+  `/usr/lib/systemd/systemd-modules-load`, and confirming `/dev/ps5-fan`
+  returned.
+- Built `dkms/ps5-icc-fan/ps5_fanctl` and updated root `make install` to copy it
+  under `/usr/local/lib/ps5-linux-cpuclock/dkms/ps5-icc-fan/` when available, so
+  installed `ps5gov-trace.sh` can capture EMC zones.
+- Root service smoke test passed after install:
+  `sudo -n /usr/local/lib/ps5-linux-cpuclock/governors/ps5gov-smoke.sh --service`.
+  That restore test stops `ps5gov`, so the service was started again afterward.
+- Do not stage generated binaries, external Cyan checkouts, or target-built
+  helper binaries unless deliberately adopting them.
 
 PS5 target:
 
@@ -53,28 +78,90 @@ Validated on target:
 - Staged fan curve test worked once: stage 3 around 65C, stage 2 around 61C,
   restore pattern 0 on exit.
 - Root `ps5gov-trace.sh` captures EMC zones, CPU/GPU/fan state, and boost.
+- Local trace script now also captures GPU load, configured load method, active
+  load method, and raw fdinfo `drm-engine-gfx` counter. These changes were
+  built/installed on the PS5 target and verified in `/run/ps5-power.gpu`.
+- A 10-second root trace verified the new CSV columns:
+  `/tmp/ps5gov-traces/ps5gov-trace-1781257111.csv`.
+- A 45-second `vkmark --winsys wayland` trace verified fdinfo-visible GPU load:
+  `vkmark` saw GPU id `0x13fb`, governor load reached 0.980, current/target/
+  desired MHz reached 2230, and GPU boost reached `1`.
+  Trace: `/tmp/ps5gov-traces/ps5gov-trace-1781257336.csv`.
+- A sustained 15-minute `vkmark --winsys wayland` trace verified ramp behavior
+  under longer load: 841 samples over 900 seconds, active method `fdinfo`,
+  average load about 1.001 before clamping, max current/target/desired 2230 MHz,
+  boost active for 834 samples, max temperature 73 C, no thermal cap.
+  Trace: `/tmp/ps5gov-traces/ps5gov-trace-1781257417.csv`.
+- After adding load clamping, a 60-second `vkmark --winsys wayland` regression
+  trace showed max load 1.000, max current 2230 MHz, boost active, and no thermal
+  cap. Trace: `/tmp/ps5gov-traces/ps5gov-trace-1781258458.csv`.
+- A 10-second trace after DKMS fan module install and `ps5_fanctl` install
+  verified EMC zone columns populate:
+  `/tmp/ps5gov-traces/ps5gov-trace-1781261518.csv`.
+- A 5-second trace after validating modules-load persistence again showed EMC
+  zone columns populated:
+  `/tmp/ps5gov-traces/ps5gov-trace-1781261815.csv`.
+- `ps5gov-trace.sh` now supports `-n note` or `PS5GOV_TRACE_NOTE` and records a
+  `note` CSV column, so real-game traces can identify the game/scene without
+  renaming files during capture.
+- Installed trace note support was verified with:
+  `/tmp/ps5gov-traces/ps5gov-trace-1781262008.csv`.
+- Installed `supertuxkart` for an unattended real-game validation path.
+- A 15-minute `supertuxkart` profile trace verified real-game fdinfo load and
+  moving-target behavior: 868 samples over 929 seconds, note
+  `supertuxkart-lighthouse-profile`, active method `fdinfo`, average load 0.493,
+  max load 0.738, current/target/desired MHz reached 2230, boost active for 816
+  samples, max hwmon temp 72 C, max EMC zones 70.87/66.22/29.64/58.50 C, fan
+  pattern 1, and no thermal cap. Trace:
+  `/tmp/ps5gov-traces/ps5gov-trace-1781262531.csv`.
+- A 30-minute commercial game trace with Shadow of the Tomb Raider Trial
+  (`steam://rungameid/974630`, Proton, manually launched benchmark) verified
+  heavy real-game behavior: 1622 samples over 1800 seconds, note
+  `shadow-trial-manual-benchmark`, active method `fdinfo`, average load 0.972,
+  max load 1.000, max hwmon temp 84 C, max EMC zones
+  81.00/83.25/29.38/71.98 C, current/target/desired MHz reached 2230, boost
+  active, thermal cap level 3 appeared for 746 samples, fan pattern 1. Trace:
+  `/tmp/ps5gov-traces/ps5gov-trace-1781268618.csv`.
 
 Important caveats:
 
-- GPU ramp validation is still pending. SSH tests with `vkcube --wsi display`
-  failed without a display, and `gamescope --backend headless -- vkcube` launched
-  Vulkan but did not produce fdinfo-visible `drm-engine-gfx` load for the current
-  GPU sampler.
-- A real game or fdinfo-visible benchmark session is needed before marking GPU
-  moving-target defaults, boost behavior, and thermal cap behavior validated.
+- Basic GPU ramp validation passed with `vkmark --winsys wayland`: fdinfo load
+  is visible, GPU clocks ramp to 2230 MHz, and boost becomes non-zero.
+- Sustained synthetic, open-source game, and commercial game traces now validate
+  fdinfo sampling, moving-target ramp, boost behavior, and natural warm thermal
+  cap transitions. Subjective fan/noise feedback is still needed before
+  finalizing default fan tuning.
 - After changing script defaults, use `systemctl restart ps5gov`, not only
   `systemctl reload ps5gov`; reload keeps the existing parent shell process.
 
 Next best work:
 
-- Capture 15-30 minute root traces during a real game or fdinfo-visible GPU
-  benchmark:
-  `sudo ps5gov-trace.sh -d 1800 -i 1`.
-- Check GPU load/current/target/desired MHz, boost state, EMC zones, fan pattern,
-  and subjective fan noise from those traces.
-- Tune the default fan curve only after those real gaming traces exist.
-- If no fdinfo-visible workload can be produced, revisit GPU load sampling:
-  fdinfo vs safer libdrm/kernel path vs Cyan-style busy sampling.
+- Review real-game trace data against subjective fan noise. Shadow Trial reached
+  84 C hwmon / 83.25 C EMC zone and thermal cap level 3 for 746 samples with fan
+  pattern 1; if noise was acceptable but temperature is considered too warm,
+  test the staged fan curve or a lower target temperature. If noise was too loud,
+  keep current defaults and accept thermal cap behavior.
+- Capture additional 15-30 minute root traces for heavier real games as needed:
+  `sudo ps5gov-trace.sh -d 1800 -i 1 -n game-or-scene-name`.
+- Best commercial target for repeatable heavier tuning is Shadow of the Tomb
+  Raider: Definitive Edition, because it is a native Linux/Feral Vulkan game
+  with a command-line benchmark path. Suggested trace:
+  `sudo ps5gov-trace.sh -d 1800 -i 1 -n shadow-tomb-raider-benchmark`, then run
+  `steam -applaunch 750920 -benchmark`.
+- Current installed commercial target is Shadow of the Tomb Raider Trial
+  (`974630`) through Proton. It has a launcher, so the validated workflow is:
+  start the benchmark manually, then attach a trace with
+  `sudo ps5gov-trace.sh -d 1800 -i 1 -n shadow-trial-manual-benchmark`.
+- Other commercial fallback candidates: Deus Ex: Mankind Divided, DiRT Rally,
+  and Mad Max, all with reported benchmark/automation paths. Avoid making Total
+  War the first choice because its benchmark is less command-line friendly.
+- If a commercial game does not produce fdinfo-visible load, compare it against
+  the validated `vkmark --winsys wayland` and SuperTuxKart paths before
+  revisiting GPU load sampling.
+- GPU traces include configured load method, active load method, the raw fdinfo
+  `drm-engine-gfx` counter, and a note column so real-game runs can distinguish
+  "governor did not ramp" from "current sampler saw no GPU work" and tie fan
+  noise observations to a specific game/scene.
 
 ## Current state
 
@@ -228,8 +315,9 @@ come from conservative policy assumptions and existing repo defaults:
 
 Validation required before making this default:
 
-- Record idle desktop, game load, and sustained benchmark traces on real PS5
-  hardware.
+- Record idle desktop and real-game traces on real PS5 hardware. Sustained
+  benchmark traces have already been captured with `vkmark --winsys wayland`,
+  and an unattended SuperTuxKart real-game trace has been captured.
 - Compare hottest hwmon temperature with DKMS EMC zone temperatures.
 - Confirm which servo pattern numbers map to default/cool/max behavior.
 - Confirm target-temp writes affect EMC auto-servo behavior predictably.
@@ -248,11 +336,13 @@ Validation required before making this default:
 - [x] Under headless CPU benchmark load, CPU ramps up and boost state becomes
       non-zero; `openssl speed -multi 16` drove CPU from P5/1600 to P0/3200 and
       boost state to `0x1`.
-- [ ] Under a GPU-visible game/benchmark session, GPU ramps up and boost state
-      becomes non-zero. SSH attempts with `vkcube --wsi display` failed without a
-      display, and `gamescope --backend headless -- vkcube` launched Vulkan but
-      did not produce fdinfo-visible GPU load for the governor.
-- [ ] At high temperature, boost is cleared and GPU cap falls in stages.
+- [x] Under a GPU-visible game/benchmark session, GPU ramps up and boost state
+      becomes non-zero. `vkmark --winsys wayland` on the target produced
+      fdinfo-visible load, reached 2230 MHz, and set GPU boost non-zero.
+- [x] At high temperature, boost is cleared and GPU cap falls in stages.
+      Shadow Trial naturally reached thermal cap level 3 for 746 samples during
+      a 30-minute trace; samples show boost off and target/current capped to
+      2000 MHz when thermal cap is active.
 - [x] `sudo ps5govctl restore` stops the service and restores CPU P0/GPU 2000;
       verified boost `0x0`, CPU P0 request, GPU reset to 2000, fan pattern 0,
       then restarted `ps5gov.service`.
@@ -264,6 +354,10 @@ Validation required before making this default:
       the optional `ps5-icc-fan` DKMS module.
 - [x] `make -C dkms/ps5-icc-fan` succeeds on the target kernel.
 - [x] `sudo insmod ps5_icc_fan.ko` creates `/dev/ps5-fan`.
+- [x] `ps5-icc-fan` is installed through DKMS and `modprobe ps5_icc_fan` creates
+      `/dev/ps5-fan` on the running target kernel.
+- [x] `/etc/modules-load.d/ps5-icc-fan.conf` loads `ps5_icc_fan` automatically;
+      validated with `systemd-modules-load` on the running target.
 - [x] `sudo ps5_fanctl temp 0`, `mode-get 0`, and `servo 0` return sane data
       before any fan writes are tested.
 - [x] Conservative fan writes passed on target: pattern `0`, pattern `1`,
@@ -304,23 +398,47 @@ Validation required before making this default:
       restored pattern 0 on exit.
 - [x] Capture a short headless CPU benchmark trace with:
       hottest hwmon temp, EMC zone temp, CPU clocks, boost state, and fan state.
-- [ ] Capture GPU-visible game load and sustained benchmark traces with:
-      hottest hwmon temp, EMC zone temp, CPU/GPU clocks, boost state, fan state,
-      and subjective fan noise.
+- [x] Capture GPU-visible sustained benchmark traces with: hottest hwmon temp,
+      CPU/GPU clocks, boost state, and fan state. `vkmark --winsys wayland`
+      produced a 900-second trace with 2230 MHz boost and no thermal cap.
+- [x] Capture real game traces with: hottest hwmon temp, EMC zone temp, CPU/GPU
+      clocks, boost state, and fan state. SuperTuxKart profile trace captured
+      15 minutes with note `supertuxkart-lighthouse-profile`; Shadow Trial
+      captured 30 minutes with note `shadow-trial-manual-benchmark`.
+- [ ] Record subjective fan noise for the real-game trace.
 - [x] Use `ps5gov-trace.sh` for short tuning runs with EMC zones, CPU/GPU clocks,
       boost, and fan state. Verified 10-second root trace on target.
-- [ ] Run longer 15-30 minute traces under game/benchmark load.
-- [ ] Validate GPU moving-target defaults against an fdinfo-visible game load and
-      sustained benchmark traces on real PS5 hardware.
+- [x] Installed `ps5_fanctl` into the runtime library tree so installed
+      `ps5gov-trace.sh` captures EMC zones instead of `?`.
+- [x] Run longer 15-30 minute traces under benchmark load.
+- [x] Validate GPU moving-target defaults against an fdinfo-visible sustained
+      benchmark trace on real PS5 hardware.
+- [x] Validate GPU moving-target defaults against a real game trace on real PS5
+      hardware.
 - [ ] Validate provisional fan curve points and adjust from measured trace data;
       do not promote the curve to default until this is done.
 
 ## Next implementation work
 
-- [ ] Decide whether GPU busy sampling should stay fdinfo-based or move to a
-      safer kernel/libdrm path for Cyan-style busy sampling.
+- [x] Decide whether GPU busy sampling should stay fdinfo-based or move to a
+      safer kernel/libdrm path for Cyan-style busy sampling. Current decision:
+      keep fdinfo plus debugfs fallback in userspace for now; do not add
+      userspace MMIO busy sampling until real game/benchmark traces show both
+      fdinfo and debugfs are inadequate.
 - [ ] If this becomes more than a PoC, move all SMN mailbox transactions behind a
       kernel `/dev/mp1` ioctl or another kernel-locked interface.
+      Preferred direction: a DKMS module that owns the SMN mailbox transport and
+      exposes curated ioctls through a character device such as `/dev/ps5-smu`,
+      `/dev/ps5-smn`, or an extended `/dev/mp1`.
+      Keep governor policy in userspace; move only mailbox transport,
+      serialization, and hardware ownership into the kernel.
+      Do not expose raw arbitrary SMN read/write or arbitrary mailbox messages by
+      default. Safe initial ioctls should cover only the validated operations:
+      CPU P-state request/query, GPU GFXCLK request, voltage reads, and possibly
+      MP1 boost ownership if consolidating `/dev/mp1`.
+      The main benefit is removing the userspace PCI config-space race around
+      the `0xB8/0xBC` SMN index/data pair and coordinating with in-kernel SMN
+      users through a kernel-owned lock/helper path.
 
 ## Deferred by design
 

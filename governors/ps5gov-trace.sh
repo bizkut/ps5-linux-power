@@ -5,6 +5,7 @@ set -u
 DURATION=300
 INTERVAL=1
 OUT_DIR=/tmp/ps5gov-traces
+NOTE="${PS5GOV_TRACE_NOTE:-}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 TOOLS_DIR="${PS5GOV_TOOLS_DIR:-/usr/local/lib/ps5-linux-cpuclock}"
@@ -19,7 +20,7 @@ SERVICE="${PS5GOV_SERVICE:-ps5gov.service}"
 
 usage() {
 	cat <<'EOF'
-usage: ps5gov-trace.sh [-d seconds] [-i seconds] [-o output_dir]
+usage: ps5gov-trace.sh [-d seconds] [-i seconds] [-o output_dir] [-n note]
 
 Records CSV samples for fan/GPU governor tuning:
   time, hottest hwmon temperature/source, EMC zone temps when /dev/ps5-fan works,
@@ -34,11 +35,16 @@ is_uint() {
 	esac
 }
 
-while getopts ":d:i:o:h" opt; do
+csv_escape() {
+	printf '%s' "$1" | tr '\n,' ' _'
+}
+
+while getopts ":d:i:o:n:h" opt; do
 	case "$opt" in
 	d) DURATION=$OPTARG ;;
 	i) INTERVAL=$OPTARG ;;
 	o) OUT_DIR=$OPTARG ;;
+	n) NOTE=$OPTARG ;;
 	h) usage; exit 0 ;;
 	*) usage >&2; exit 2 ;;
 	esac
@@ -122,7 +128,7 @@ boost_state() {
 }
 
 printf '%s\n' \
-	'ts,service,hwmon_temp_c,hwmon_source,emc_zone0_c,emc_zone1_c,emc_zone2_c,emc_zone3_c,cpu_pstate,cpu_mhz,gpu_current_mhz,gpu_target_mhz,gpu_desired_mhz,gpu_boost,gpu_thermal_cap,fan_pattern,fan_curve_stage,fan_target_temp_c,fan_reason,boost_state' > "$OUT"
+	'ts,note,service,hwmon_temp_c,hwmon_source,emc_zone0_c,emc_zone1_c,emc_zone2_c,emc_zone3_c,cpu_pstate,cpu_mhz,gpu_load,gpu_load_method,gpu_active_load_method,gpu_fdinfo_gfx_ns,gpu_current_mhz,gpu_target_mhz,gpu_desired_mhz,gpu_boost,gpu_thermal_cap,fan_pattern,fan_curve_stage,fan_target_temp_c,fan_reason,boost_state' > "$OUT"
 
 end=$(( $(date +%s) + DURATION ))
 while [ "$(date +%s)" -le "$end" ]; do
@@ -134,6 +140,10 @@ while [ "$(date +%s)" -le "$end" ]; do
 	emc3=$(emc_temp 3)
 	cpu_pstate=$(read_state_value /run/ps5-power.cpu current_pstate)
 	cpu_mhz=$(read_state_value /run/ps5-power.cpu current_mhz)
+	gpu_load=$(read_state_value /run/ps5-power.gpu load)
+	gpu_method=$(read_state_value /run/ps5-power.gpu load_method)
+	gpu_active_method=$(read_state_value /run/ps5-power.gpu active_load_method)
+	gpu_fdinfo_gfx_ns=$(read_state_value /run/ps5-power.gpu fdinfo_gfx_ns)
 	gpu_cur=$(read_state_value /run/ps5-power.gpu current_mhz)
 	gpu_target=$(read_state_value /run/ps5-power.gpu target_mhz)
 	gpu_desired=$(read_state_value /run/ps5-power.gpu desired_mhz)
@@ -144,9 +154,10 @@ while [ "$(date +%s)" -le "$end" ]; do
 	fan_target=$(read_state_value /run/ps5-power.fan target_temp_c)
 	fan_reason=$(read_state_value /run/ps5-power.fan reason | tr ',' '_')
 
-	printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-		"$now" "$(service_state)" "$hwmon" "$emc0" "$emc1" "$emc2" "$emc3" \
-		"$cpu_pstate" "$cpu_mhz" "$gpu_cur" "$gpu_target" "$gpu_desired" \
+	printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+		"$now" "$(csv_escape "$NOTE")" "$(service_state)" "$hwmon" "$emc0" "$emc1" "$emc2" "$emc3" \
+		"$cpu_pstate" "$cpu_mhz" "$gpu_load" "$gpu_method" "$gpu_active_method" \
+		"$gpu_fdinfo_gfx_ns" "$gpu_cur" "$gpu_target" "$gpu_desired" \
 		"$gpu_boost" "$gpu_cap" "$fan_pattern" "$fan_stage" "$fan_target" \
 		"$fan_reason" "$(boost_state)" >> "$OUT"
 	sleep "$INTERVAL"

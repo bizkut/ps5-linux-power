@@ -91,8 +91,11 @@ changing user config.
 The CPU and GPU governors write structured runtime state to
 `/run/ps5-power.cpu` and `/run/ps5-power.gpu`. `ps5govctl sensors` prints this
 state with `cpu_state_` and `gpu_state_` prefixes. The GPU file includes preset,
-load, temperature, current/target/desired MHz, effective range, boost, thermal
-cap, and burst state.
+load, configured and active load method, raw fdinfo `drm-engine-gfx` counter,
+temperature, current/target/desired MHz, effective range, boost, thermal cap,
+and burst state. GPU load is clamped to `0.0..1.0` before policy and status
+output because summed fdinfo counters can exceed wall time when multiple DRM
+fdinfo entries expose overlapping `drm-engine-gfx` counters.
 
 Manual config:
 ```sh
@@ -117,18 +120,22 @@ Target smoke checks:
 ./ps5gov-smoke.sh
 sudo ./ps5gov-smoke.sh --service
 ./ps5gov-trace.sh -d 300 -i 1
+sudo ./ps5gov-trace.sh -d 1800 -i 1 -n "game scene"
 ./ps5gov-fan-validate.sh
 sudo ./ps5gov-fan-validate.sh --write-tests
 ```
 Default mode checks local binaries, scripts, config rendering, and sensor output.
 `--service` performs the root-only systemd restart/sensors/restore lifecycle.
 The trace script writes a CSV for fan/GPU tuning with hwmon temperature, optional
-EMC zone temperatures, CPU/GPU/fan state, boost state, and service state.
+EMC zone temperatures, CPU/GPU/fan state, boost state, service state, and GPU
+load sampler diagnostics. Use `-n` or `PS5GOV_TRACE_NOTE` to add a note column
+for the game, scene, or benchmark phase being captured.
 Run it as root, or make `/dev/ps5-fan` readable, to capture EMC zone
 temperatures.
 GPU ramp validation needs an fdinfo-visible game or benchmark workload; headless
 `gamescope -- vkcube` did not exercise the current fdinfo sampler on the PS5 test
-target.
+target. Before adding a riskier Cyan-style MMIO busy sampler, capture traces that
+show whether fdinfo or the debugfs fallback actually sees the workload.
 The fan validation script runs read-only `/dev/ps5-fan` checks by default;
 `--write-tests` is gated and compares default/cool pattern and target-temp writes.
 
