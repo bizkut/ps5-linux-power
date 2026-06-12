@@ -8,6 +8,10 @@
 
 CC ?= gcc
 CPPFLAGS += -idirafter include
+KERNEL_UAPI ?= /lib/modules/$(shell uname -r)/build/include/uapi
+ifneq ($(wildcard $(KERNEL_UAPI)/linux/errno.h),)
+CPPFLAGS += -idirafter $(KERNEL_UAPI)
+endif
 CFLAGS ?= -O2 -Wall -Wextra
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin

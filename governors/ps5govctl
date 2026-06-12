@@ -9,6 +9,7 @@ CPU_CTL="$TOOLS_DIR/ps5_cpu"
 GPU_CTL="$TOOLS_DIR/ps5_gpu"
 BOOST_CTL="$TOOLS_DIR/ps5_boost"
 BOOST_STATE="/run/ps5-power.boost"
+PERFORMANCE_STATE="${PS5GOV_PERFORMANCE_STATE:-/run/ps5-power.performance}"
 FAN_STATE="/run/ps5-power.fan"
 CPU_STATE="/run/ps5-power.cpu"
 GPU_STATE="/run/ps5-power.gpu"
@@ -16,7 +17,7 @@ GPU_STATE="/run/ps5-power.gpu"
 FAN_SERVICE="ps5fan.service"
 
 usage() {
-	echo "usage: ps5govctl profile <auto|quiet|balanced|performance>|config|sensors|status|restart|restore|stop-boost" >&2
+	echo "usage: ps5govctl profile <auto|quiet|balanced|performance>|performance <on|off|status>|config|sensors|status|reload|restart|restore|stop-boost" >&2
 	exit 2
 }
 
@@ -25,6 +26,10 @@ need_root() {
 		echo "ps5govctl: must run as root" >&2
 		exit 1
 	}
+}
+
+reload_or_restart() {
+	systemctl reload "$SERVICE" 2>/dev/null || systemctl restart "$SERVICE"
 }
 
 write_profile() {
@@ -43,7 +48,7 @@ write_profile() {
 	else
 		printf 'PROFILE=%s\n' "$profile" >> "$CONFIG"
 	fi
-	systemctl restart "$SERVICE"
+	reload_or_restart
 }
 
 show_sensors() {
@@ -106,12 +111,45 @@ stop_boost() {
 	"$BOOST_CTL" off
 }
 
+performance_mode() {
+	[ "$#" -eq 1 ] || usage
+	case "$1" in
+	on)
+		need_root
+		mkdir -p "$(dirname "$PERFORMANCE_STATE")"
+		printf 'on\n' > "$PERFORMANCE_STATE"
+		reload_or_restart
+		;;
+	off)
+		need_root
+		mkdir -p "$(dirname "$PERFORMANCE_STATE")"
+		printf 'off\n' > "$PERFORMANCE_STATE"
+		reload_or_restart
+		;;
+	status)
+		if [ -r "$PERFORMANCE_STATE" ]; then
+			case "$(cat "$PERFORMANCE_STATE" 2>/dev/null)" in
+			1|on|true|performance) printf 'performance_mode=on\n' ;;
+			*) printf 'performance_mode=off\n' ;;
+			esac
+		else
+			printf 'performance_mode=off\n'
+		fi
+		;;
+	*) usage ;;
+	esac
+}
+
 [ "$#" -ge 1 ] || usage
 
 case "$1" in
 profile)
 	[ "$#" -eq 2 ] || usage
 	write_profile "$2"
+	;;
+performance)
+	shift
+	performance_mode "$@"
 	;;
 status)
 	systemctl status "$SERVICE"
@@ -121,6 +159,10 @@ config)
 	;;
 sensors)
 	show_sensors
+	;;
+reload)
+	need_root
+	systemctl reload "$SERVICE"
 	;;
 restart)
 	need_root

@@ -13,6 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#define PS5_FAN_DEV "/dev/ps5-fan"
 #define ICC_DEV "/dev/icc"
 #define FAN_LOCK "/run/lock/ps5-power.lock"
 #define FAN_STATE "/run/ps5-power.fan"
@@ -62,12 +63,38 @@
 
 #define ICC_IOC_MAGIC 'I'
 #define ICC_FAN_CHANGE_SERVO_PATTERN _IOW(ICC_IOC_MAGIC, 1, unsigned char)
+#define PS5_FAN_IOC_MAGIC 'F'
+
+struct ps5_fan_pattern {
+	unsigned char pattern;
+};
+
+#define PS5_FAN_CHANGE_SERVO_PATTERN _IOW(PS5_FAN_IOC_MAGIC, 1, struct ps5_fan_pattern)
+
 #define FAN_PATTERN_DEFAULT 0
 #define FAN_PATTERN_COOL 1
+#define MAX_CURVE_POINTS 8
+
+struct ps5_fan_target_temp {
+	unsigned char zone;
+	unsigned char temperature_c;
+};
+
+#define PS5_FAN_TARGET_TEMP_SET _IOW(PS5_FAN_IOC_MAGIC, 6, struct ps5_fan_target_temp)
+
+struct curve_point {
+	int up_c;
+	int target_c;
+	unsigned char pattern;
+};
 
 static volatile sig_atomic_t stop;
 static int verbose;
 static int restore_on_exit = 1;
+static int log_every = 10;
+static int hysteresis_c = 4;
+static int curve_len;
+static struct curve_point curve[MAX_CURVE_POINTS];
 
 static void on_signal(int s)
 {
@@ -84,6 +111,7 @@ static void ensure_runtime_dirs(void)
 
 static int write_state(unsigned char pattern, int temp_c, int on_temp, int off_temp,
 		       unsigned char default_pattern, unsigned char cool_pattern,
+		       int curve_stage, int target_temp_c,
 		       const char *sensor, const char *reason)
 {
 	char tmp[] = FAN_STATE ".tmp";
@@ -98,17 +126,27 @@ static int write_state(unsigned char pattern, int temp_c, int on_temp, int off_t
 	fprintf(f, "off_temp_c=%d\n", off_temp);
 	fprintf(f, "default_pattern=%u\n", default_pattern);
 	fprintf(f, "cool_pattern=%u\n", cool_pattern);
+	fprintf(f, "curve_stage=%d\n", curve_stage);
+	fprintf(f, "target_temp_c=%d\n", target_temp_c);
 	fprintf(f, "sensor=%s\n", sensor ? sensor : "unknown");
 	fprintf(f, "reason=%s\n", reason ? reason : "unknown");
 	fclose(f);
 	return rename(tmp, FAN_STATE);
 }
 
-static int set_fan_pattern_locked(int fd, unsigned char pattern)
+static int set_fan_pattern_locked(int fd, const char *dev, unsigned char pattern)
 {
-	int ret = ioctl(fd, ICC_FAN_CHANGE_SERVO_PATTERN, &pattern);
+	int ret;
+
+	if (!strcmp(dev, PS5_FAN_DEV)) {
+		struct ps5_fan_pattern req = { .pattern = pattern };
+
+		ret = ioctl(fd, PS5_FAN_CHANGE_SERVO_PATTERN, &req);
+	} else {
+		ret = ioctl(fd, ICC_FAN_CHANGE_SERVO_PATTERN, &pattern);
+	}
 	if (ret < 0)
-		perror("ICC_FAN_CHANGE_SERVO_PATTERN");
+		perror(dev);
 	return ret < 0 ? -1 : 0;
 }
 
@@ -128,17 +166,107 @@ static int set_fan_pattern(unsigned char pattern)
 		return -1;
 	}
 
-	fd = open(ICC_DEV, O_RDWR | O_CLOEXEC);
+	fd = open(PS5_FAN_DEV, O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
-		perror("open " ICC_DEV);
-		goto out;
+		fd = open(ICC_DEV, O_RDWR | O_CLOEXEC);
+		if (fd < 0) {
+			perror("open " PS5_FAN_DEV " or " ICC_DEV);
+			goto out;
+		}
+		ret = set_fan_pattern_locked(fd, ICC_DEV, pattern);
+	} else {
+		ret = set_fan_pattern_locked(fd, PS5_FAN_DEV, pattern);
 	}
-	ret = set_fan_pattern_locked(fd, pattern);
 	close(fd);
 out:
 	flock(lock_fd, LOCK_UN);
 	close(lock_fd);
 	return ret;
+}
+
+static int set_target_temp(int target_c)
+{
+	struct ps5_fan_target_temp req = {
+		.zone = 0,
+		.temperature_c = (unsigned char)target_c,
+	};
+	int fd, ret;
+
+	if (target_c < 1 || target_c > 110)
+		return -1;
+	fd = open(PS5_FAN_DEV, O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	ret = ioctl(fd, PS5_FAN_TARGET_TEMP_SET, &req);
+	if (ret < 0 && verbose)
+		perror(PS5_FAN_DEV " target-temp");
+	close(fd);
+	return ret < 0 ? -1 : 0;
+}
+
+static int parse_u8_field(char **cursor, int *out, char delim)
+{
+	char *end;
+	long v;
+
+	errno = 0;
+	v = strtol(*cursor, &end, 10);
+	if (errno || v < 0 || v > 255 || end == *cursor || *end != delim)
+		return -1;
+	*out = (int)v;
+	*cursor = end + 1;
+	return 0;
+}
+
+static int parse_curve(const char *spec)
+{
+	char *copy, *tok, *save = NULL;
+	int last_up = -1;
+
+	if (!spec || !*spec)
+		return -1;
+	copy = strdup(spec);
+	if (!copy)
+		return -1;
+	curve_len = 0;
+	for (tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+		char *p = tok;
+		int up_c, target_c, pattern;
+
+		if (curve_len >= MAX_CURVE_POINTS ||
+		    parse_u8_field(&p, &up_c, ':') ||
+		    parse_u8_field(&p, &target_c, ':'))
+			goto bad;
+		errno = 0;
+		pattern = (int)strtol(p, &p, 10);
+		if (errno || *p || pattern < 0 || pattern > 255 ||
+		    target_c < 1 || target_c > 110 || up_c <= last_up)
+			goto bad;
+		curve[curve_len].up_c = up_c;
+		curve[curve_len].target_c = target_c;
+		curve[curve_len].pattern = (unsigned char)pattern;
+		last_up = up_c;
+		curve_len++;
+	}
+	free(copy);
+	return curve_len > 0 ? 0 : -1;
+bad:
+	free(copy);
+	curve_len = 0;
+	return -1;
+}
+
+static int curve_stage_for_temp(int temp_c, int current_stage)
+{
+	int next = current_stage;
+
+	if (next < 0)
+		next = 0;
+	while (next + 1 < curve_len && temp_c >= curve[next + 1].up_c)
+		next++;
+	while (next > 0 && temp_c <= curve[next].up_c - hysteresis_c)
+		next--;
+	return next;
 }
 
 static int read_int_file(const char *path, int *out_millideg)
@@ -291,7 +419,7 @@ read_temp:
 
 static void usage(const char *p)
 {
-	fprintf(stderr, "usage: %s [-i ms] [-H on_c] [-L off_c] [-s auto|k10temp|/path/temp_input] [-v] [-n] [-f pattern] [-a default_pattern] [-C cool_pattern]\n", p);
+	fprintf(stderr, "usage: %s [-i ms] [-H on_c] [-L off_c] [-s auto|k10temp|/path/temp_input] [-v] [-q hold_samples] [-n] [-f pattern] [-a default_pattern] [-C cool_pattern] [-c curve] [-y hysteresis_c]\n", p);
 }
 
 int main(int argc, char **argv)
@@ -299,6 +427,8 @@ int main(int argc, char **argv)
 	unsigned interval_ms = 1000;
 	int on_temp = 55, off_temp = 45, temp_c, fan_on = 0, target_fan_on;
 	int force_set = -1, read_failures = 0;
+	int hold_logs = 0;
+	int curve_stage = -1, next_stage, target_temp_c = -1;
 	unsigned long pattern_arg;
 	unsigned char default_pattern = FAN_PATTERN_DEFAULT;
 	unsigned char cool_pattern = FAN_PATTERN_COOL;
@@ -309,7 +439,7 @@ int main(int argc, char **argv)
 	int opt;
 	int ret;
 
-	while ((opt = getopt(argc, argv, "i:H:L:s:vnf:a:C:")) != -1) {
+	while ((opt = getopt(argc, argv, "i:H:L:s:vq:nf:a:C:c:y:")) != -1) {
 		switch (opt) {
 		case 'i':
 			interval_ms = strtoul(optarg, &endptr, 10);
@@ -332,6 +462,11 @@ int main(int argc, char **argv)
 		case 'v':
 			verbose = 1;
 			break;
+		case 'q':
+			log_every = (int)strtoul(optarg, &endptr, 10);
+			if (*endptr || log_every < 1)
+				goto bad;
+			break;
 		case 'n':
 			restore_on_exit = 0;
 			break;
@@ -352,6 +487,15 @@ int main(int argc, char **argv)
 			if (*endptr || pattern_arg > 255)
 				goto bad;
 			cool_pattern = (unsigned char)pattern_arg;
+			break;
+		case 'c':
+			if (parse_curve(optarg))
+				goto bad;
+			break;
+		case 'y':
+			hysteresis_c = (int)strtoul(optarg, &endptr, 10);
+			if (*endptr || hysteresis_c < 1 || hysteresis_c > 20)
+				goto bad;
 			break;
 		default:
 bad:
@@ -378,7 +522,7 @@ bad:
 		if (set_fan_pattern(current_pattern))
 			return 1;
 		write_state(current_pattern, -1, on_temp, off_temp, default_pattern,
-			    cool_pattern, "manual", "force");
+			    cool_pattern, -1, -1, "manual", "force");
 		if (verbose)
 			printf("fan event=force pattern=%u\n", current_pattern);
 		return 0;
@@ -392,15 +536,23 @@ bad:
 		return 1;
 	}
 
-	target_fan_on = fan_on = temp_c >= on_temp;
-	current_pattern = fan_on ? cool_pattern : default_pattern;
+	if (curve_len > 0) {
+		curve_stage = curve_stage_for_temp(temp_c, 0);
+		current_pattern = curve[curve_stage].pattern;
+		target_temp_c = curve[curve_stage].target_c;
+	} else {
+		target_fan_on = fan_on = temp_c >= on_temp;
+		current_pattern = fan_on ? cool_pattern : default_pattern;
+	}
 	if (set_fan_pattern(current_pattern))
 		return 1;
+	if (curve_len > 0)
+		set_target_temp(target_temp_c);
 	write_state(current_pattern, temp_c, on_temp, off_temp, default_pattern,
-		    cool_pattern, source, "init");
+		    cool_pattern, curve_stage, target_temp_c, source, "init");
 	if (verbose)
-		printf("fan event=init temp=%dC pattern=%u on=%d on_temp=%d off_temp=%d sensor=%s source=%s\n",
-		       temp_c, current_pattern, fan_on, on_temp, off_temp, sensor, source);
+		printf("fan event=init temp=%dC pattern=%u target_temp=%d curve_stage=%d on=%d on_temp=%d off_temp=%d log_every=%d sensor=%s source=%s\n",
+		       temp_c, current_pattern, target_temp_c, curve_stage, fan_on, on_temp, off_temp, log_every, sensor, source);
 
 	while (!stop) {
 		int sleep_ms = (int)interval_ms;
@@ -415,13 +567,41 @@ bad:
 				fan_on = 1;
 				current_pattern = cool_pattern;
 				write_state(current_pattern, -1, on_temp, off_temp, default_pattern,
-					    cool_pattern, sensor, "sensor_fail_safe");
+					    cool_pattern, curve_stage, target_temp_c, sensor, "sensor_fail_safe");
 				if (verbose)
 					printf("fan event=fail_safe pattern=%u sensor=%s\n", current_pattern, sensor);
 			}
 			continue;
 		}
 		read_failures = 0;
+
+		if (curve_len > 0) {
+			next_stage = curve_stage_for_temp(temp_c, curve_stage);
+			if (next_stage != curve_stage) {
+				curve_stage = next_stage;
+				current_pattern = curve[curve_stage].pattern;
+				target_temp_c = curve[curve_stage].target_c;
+				if (set_fan_pattern(current_pattern)) {
+					fprintf(stderr, "failed to set fan pattern=%u at temp=%dC\n", current_pattern, temp_c);
+					continue;
+				}
+				set_target_temp(target_temp_c);
+				write_state(current_pattern, temp_c, on_temp, off_temp, default_pattern,
+					    cool_pattern, curve_stage, target_temp_c, source, "curve");
+				if (verbose)
+					printf("fan event=curve temp=%dC stage=%d pattern=%u target_temp=%d source=%s\n",
+					       temp_c, curve_stage, current_pattern, target_temp_c, source);
+			} else {
+				write_state(current_pattern, temp_c, on_temp, off_temp, default_pattern,
+					    cool_pattern, curve_stage, target_temp_c, source, "hold");
+				if (verbose && ++hold_logs >= log_every) {
+					hold_logs = 0;
+					printf("fan event=hold temp=%dC stage=%d pattern=%u target_temp=%d source=%s\n",
+					       temp_c, curve_stage, current_pattern, target_temp_c, source);
+				}
+			}
+			continue;
+		}
 
 		target_fan_on = fan_on ? (temp_c > off_temp) : (temp_c >= on_temp);
 		if (target_fan_on != fan_on) {
@@ -432,16 +612,18 @@ bad:
 				continue;
 			}
 			write_state(current_pattern, temp_c, on_temp, off_temp, default_pattern,
-				    cool_pattern, source, "toggle");
+				    cool_pattern, curve_stage, target_temp_c, source, "toggle");
 			if (verbose)
 				printf("fan event=toggle temp=%dC pattern=%u fan=%d source=%s\n",
 				       temp_c, current_pattern, fan_on, source);
 		} else {
 			write_state(current_pattern, temp_c, on_temp, off_temp, default_pattern,
-				    cool_pattern, source, "hold");
-			if (verbose)
+				    cool_pattern, curve_stage, target_temp_c, source, "hold");
+			if (verbose && ++hold_logs >= log_every) {
+				hold_logs = 0;
 				printf("fan event=hold temp=%dC pattern=%u fan=%d source=%s\n",
 				       temp_c, current_pattern, fan_on, source);
+			}
 		}
 	}
 
@@ -452,7 +634,7 @@ bad:
 			return ret;
 		}
 		write_state(default_pattern, temp_c, on_temp, off_temp, default_pattern,
-			    cool_pattern, source, "restore");
+			    cool_pattern, -1, -1, source, "restore");
 		if (verbose)
 			printf("fan event=restore temp=%dC pattern=%u\n", temp_c, default_pattern);
 	}

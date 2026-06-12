@@ -42,7 +42,7 @@
 #define STATUS_PATH "/run/ps5-power.gpu"
 
 static double up_high = 0.50, up_mid = 0.20, up_low = 0.05;
-static int interval_ms = 500, down_count = 6, throttle_temp = 85, recovery_temp = 75, verbose;
+static int interval_ms = 500, down_count = 6, throttle_temp = 85, recovery_temp = 75, verbose, log_every = 10;
 static int adjust_mhz = 50, step_mhz = 150, burst_step_mhz = 500, burst_samples = 3;
 static uint32_t range_min_mhz = G_IDLE, range_max_mhz = G_BOOST;
 static const char *preset_name = "custom";
@@ -123,11 +123,12 @@ static int validate_args(const char *prog)
 	    !(up_high > up_mid && up_mid > up_low) ||
 	    throttle_temp < 1 || throttle_temp > 110 ||
 	    recovery_temp < 1 || recovery_temp >= throttle_temp ||
+	    log_every < 1 ||
 	    (strcmp(temp_source, "auto") && strcmp(temp_source, "gpu") && strcmp(temp_source, "k10temp")) ||
 	    (strcmp(load_method, "fdinfo") && strcmp(load_method, "debugfs") &&
 	     strcmp(load_method, "auto") && strcmp(load_method, "busy"))) {
 		fprintf(stderr,
-			"usage: %s [-P auto|quiet|balanced|performance] [-i ms>=50] [-d downcount>=1] [-H high] [-M mid] [-L low] [-A adjust_mhz] [-U step_mhz] [-b burst_step_mhz] [-B burst_samples] [-n 400..2230] [-x 400..2230] [-T 1..110] [-R 1..T-1] [-S auto|gpu|k10temp] [-m fdinfo|debugfs|auto|busy] [-v]\n",
+		 "usage: %s [-P auto|quiet|balanced|performance] [-i ms>=50] [-d downcount>=1] [-H high] [-M mid] [-L low] [-A adjust_mhz] [-U step_mhz] [-b burst_step_mhz] [-B burst_samples] [-n 400..2230] [-x 400..2230] [-T 1..110] [-R 1..T-1] [-S auto|gpu|k10temp] [-m fdinfo|debugfs|auto|busy] [-v] [-q hold_samples>=1]\n",
 			prog);
 		return -1;
 	}
@@ -481,11 +482,12 @@ int main(int argc, char **argv)
 {
 	int opt, low_streak = 0, burst_streak = 0;
 	int boost_on = 0, boost_changed, thermal_cap = 0;
+	int hold_logs = 0;
 	uint32_t cur_mhz = G_MAX, target_mhz = G_MAX;
 	unsigned long long pg, g;
 	struct timespec pt, t, ts;
 
-	while ((opt = getopt(argc, argv, "P:i:d:H:M:L:A:U:b:B:n:x:T:R:S:m:v")) != -1) {
+	while ((opt = getopt(argc, argv, "P:i:d:H:M:L:A:U:b:B:n:x:T:R:S:m:vq:")) != -1) {
 		switch (opt) {
 		case 'P':
 			if (apply_preset(optarg)) {
@@ -509,8 +511,9 @@ int main(int argc, char **argv)
 		case 'S': temp_source = optarg; break;
 		case 'm': load_method = optarg; break;
 		case 'v': verbose = 1; break;
+		case 'q': log_every = atoi(optarg); break;
 		default:
-			fprintf(stderr, "usage: %s [-P auto|quiet|balanced|performance] [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-A adjust_mhz] [-U step_mhz] [-b burst_step_mhz] [-B burst_samples] [-n min_mhz] [-x max_mhz] [-T throttle_c] [-R recovery_c] [-S auto|gpu|k10temp] [-m fdinfo|debugfs|auto|busy] [-v]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-P auto|quiet|balanced|performance] [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-A adjust_mhz] [-U step_mhz] [-b burst_step_mhz] [-B burst_samples] [-n min_mhz] [-x max_mhz] [-T throttle_c] [-R recovery_c] [-S auto|gpu|k10temp] [-m fdinfo|debugfs|auto|busy] [-v] [-q hold_samples]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -530,8 +533,8 @@ int main(int argc, char **argv)
 	pg = sum_gfx_ns();
 	clock_gettime(CLOCK_MONOTONIC, &pt);
 	if (verbose)
-		printf("ps5_gpu_gov: started preset=%s interval_ms=%d down_count=%d load_thresholds=%.0f/%.0f/%.0f adjust_mhz=%d step_mhz=%d burst_step_mhz=%d burst_samples=%d range=%u..%u throttle_c=%d recovery_c=%d temp_source=%s load_method=%s\n",
-		       preset_name, interval_ms, down_count, up_high * 100, up_mid * 100, up_low * 100,
+		printf("ps5_gpu_gov: started preset=%s interval_ms=%d down_count=%d log_every=%d load_thresholds=%.0f/%.0f/%.0f adjust_mhz=%d step_mhz=%d burst_step_mhz=%d burst_samples=%d range=%u..%u throttle_c=%d recovery_c=%d temp_source=%s load_method=%s\n",
+		       preset_name, interval_ms, down_count, log_every, up_high * 100, up_mid * 100, up_low * 100,
 		       adjust_mhz, step_mhz, burst_step_mhz, burst_samples, range_min_mhz, range_max_mhz,
 		       throttle_temp, recovery_temp, temp_source, load_method);
 
@@ -638,7 +641,8 @@ int main(int argc, char **argv)
 					       boost_on, thermal_cap, burst);
 				cur_mhz = target_mhz;
 			}
-		} else if (verbose) {
+		} else if (verbose && ++hold_logs >= log_every) {
+			hold_logs = 0;
 			printf("gpu event=hold load=%.0f%% temp=%dC current=%u target=%u desired=%u boost=%d thermal_cap=%d burst=%d\n",
 			       load * 100, temp, cur_mhz, target_mhz, desired_mhz,
 			       boost_on, thermal_cap, burst);

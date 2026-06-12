@@ -34,7 +34,7 @@
 #define STATUS_PATH "/run/ps5-power.cpu"
 
 static double up_high = 0.40, up_mid = 0.20, up_low = 0.08;
-static int interval_ms = 500, down_count = 6, verbose;
+static int interval_ms = 500, down_count = 6, verbose, log_every = 10;
 static volatile sig_atomic_t stop;
 
 static void on_signal(int s) { (void)s; stop = 1; }
@@ -51,9 +51,10 @@ static int validate_args(const char *prog)
 	if (interval_ms < 50 || down_count < 1 ||
 	    up_high <= 0.0 || up_mid <= 0.0 || up_low <= 0.0 ||
 	    up_high > 1.0 || up_mid > 1.0 || up_low > 1.0 ||
+	    log_every < 1 ||
 	    !(up_high > up_mid && up_mid > up_low)) {
 		fprintf(stderr,
-			"usage: %s [-i ms>=50] [-d downcount>=1] [-H high] [-M mid] [-L low] [-v]\n",
+			"usage: %s [-i ms>=50] [-d downcount>=1] [-H high] [-M mid] [-L low] [-v] [-q hold_samples>=1]\n",
 			prog);
 		return -1;
 	}
@@ -118,11 +119,12 @@ int main(int argc, char **argv)
 {
 	int opt, low_streak = 0;
 	int boost_on = 0;
+	int hold_logs = 0;
 	unsigned long long pb = 0, pt = 0, b, t;
 	uint32_t current = P_MAX, target;
 	struct timespec ts;
 
-	while ((opt = getopt(argc, argv, "i:d:H:M:L:v")) != -1) {
+	while ((opt = getopt(argc, argv, "i:d:H:M:L:vq:")) != -1) {
 		switch (opt) {
 		case 'i': interval_ms = atoi(optarg); break;
 		case 'd': down_count = atoi(optarg); break;
@@ -130,8 +132,9 @@ int main(int argc, char **argv)
 		case 'M': up_mid = parse_load_arg(optarg); break;
 		case 'L': up_low = parse_load_arg(optarg); break;
 		case 'v': verbose = 1; break;
+		case 'q': log_every = atoi(optarg); break;
 		default:
-			fprintf(stderr, "usage: %s [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-v]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-v] [-q hold_samples]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -151,8 +154,8 @@ int main(int argc, char **argv)
 	current = P_MAX;
 	read_cpu(&pb, &pt);
 	if (verbose)
-		printf("ps5_cpu_gov: started, interval=%dms down_count=%d load=%.0f/%.0f/%.0f%%\n",
-		       interval_ms, down_count, up_high * 100, up_mid * 100, up_low * 100);
+		printf("ps5_cpu_gov: started, interval=%dms down_count=%d log_every=%d load=%.0f/%.0f/%.0f%%\n",
+		       interval_ms, down_count, log_every, up_high * 100, up_mid * 100, up_low * 100);
 
 	while (!stop) {
 		ts.tv_sec = interval_ms / 1000;
@@ -202,7 +205,8 @@ int main(int argc, char **argv)
 					       load * 100, current, mhz(current), target, mhz(target), boost_on);
 				current = target;
 			}
-		} else if (verbose) {
+		} else if (verbose && ++hold_logs >= log_every) {
+			hold_logs = 0;
 			printf("cpu event=hold load=%.0f%% target=P%u(%s) boost=%d\n",
 			       load * 100, current, mhz(current), boost_on);
 		}

@@ -52,6 +52,8 @@ done
 
 run_check "ps5govctl syntax" sh -n "$CTL"
 run_check "run-governors syntax" sh -n "$RUNNER"
+run_check "ps5gov-trace syntax" sh -n "$DIR/ps5gov-trace.sh"
+run_check "ps5gov-fan-validate syntax" sh -n "$DIR/ps5gov-fan-validate.sh"
 
 for exe in "$DIR/ps5_cpu_gov" "$DIR/ps5_gpu_gov" "$DIR/ps5_fan_gov" \
 	   "$ROOT/ps5_cpu" "$ROOT/ps5_gpu" "$ROOT/ps5_boost"; do
@@ -100,6 +102,9 @@ if [ "$SERVICE_MODE" -eq 1 ]; then
 		systemctl restart "$SERVICE" >/dev/null 2>&1 || fail "restart $SERVICE"
 		sleep 2
 		systemctl is-active --quiet "$SERVICE" && ok "$SERVICE active" || fail "$SERVICE active"
+		PS5GOV_SERVICE="$SERVICE" "$CTL" reload >/dev/null 2>&1 && ok "reload $SERVICE" || fail "reload $SERVICE"
+		sleep 2
+		systemctl is-active --quiet "$SERVICE" && ok "$SERVICE active after reload" || fail "$SERVICE active after reload"
 		PS5GOV_CONFIG="$CONFIG" PS5GOV_RUNNER="$RUNNER" PS5GOV_TOOLS_DIR="$TOOLS_DIR" \
 			"$CTL" sensors >/dev/null 2>&1 && ok "service sensors" || fail "service sensors"
 		PS5GOV_CONFIG="$CONFIG" PS5GOV_RUNNER="$RUNNER" PS5GOV_TOOLS_DIR="$TOOLS_DIR" \

@@ -23,7 +23,16 @@ GPU_CTL="$ROOT/ps5_gpu"
 BOOST_CTL="$ROOT/ps5_boost"
 SMN_CFG="/sys/bus/pci/devices/0000:00:00.0/config"
 PS5GOV_CONFIG="${PS5GOV_CONFIG:-/etc/ps5-linux-cpuclock/ps5gov.conf}"
+PERFORMANCE_STATE="${PS5GOV_PERFORMANCE_STATE:-/run/ps5-power.performance}"
 PRINT_CONFIG=0
+
+ENV_PROFILE_SET=0; [ -z "${PROFILE+x}" ] || { ENV_PROFILE_SET=1; ENV_PROFILE_VALUE=$PROFILE; }
+ENV_FAN_ENABLED_SET=0; [ -z "${FAN_ENABLED+x}" ] || { ENV_FAN_ENABLED_SET=1; ENV_FAN_ENABLED_VALUE=$FAN_ENABLED; }
+ENV_FAN_CURVE_SET=0; [ -z "${FAN_CURVE+x}" ] || { ENV_FAN_CURVE_SET=1; ENV_FAN_CURVE_VALUE=$FAN_CURVE; }
+ENV_FAN_HYSTERESIS_SET=0; [ -z "${FAN_HYSTERESIS+x}" ] || { ENV_FAN_HYSTERESIS_SET=1; ENV_FAN_HYSTERESIS_VALUE=$FAN_HYSTERESIS; }
+ENV_FAN_ARGS_SET=0; [ -z "${FAN_ARGS+x}" ] || { ENV_FAN_ARGS_SET=1; ENV_FAN_ARGS_VALUE=$FAN_ARGS; }
+ENV_CPU_ARGS_SET=0; [ -z "${CPU_ARGS+x}" ] || { ENV_CPU_ARGS_SET=1; ENV_CPU_ARGS_VALUE=$CPU_ARGS; }
+ENV_GPU_ARGS_SET=0; [ -z "${GPU_ARGS+x}" ] || { ENV_GPU_ARGS_SET=1; ENV_GPU_ARGS_VALUE=$GPU_ARGS; }
 
 case "${1:-}" in
 --print-config)
@@ -34,6 +43,17 @@ esac
 
 die() { echo "run-governors: $*" >&2; exit 1; }
 log() { echo "run-governors: $*"; }
+
+reset_runtime_config() {
+	unset PROFILE FAN_ENABLED FAN_CURVE FAN_HYSTERESIS FAN_ARGS CPU_ARGS GPU_ARGS
+	[ "$ENV_PROFILE_SET" -eq 0 ] || PROFILE=$ENV_PROFILE_VALUE
+	[ "$ENV_FAN_ENABLED_SET" -eq 0 ] || FAN_ENABLED=$ENV_FAN_ENABLED_VALUE
+	[ "$ENV_FAN_CURVE_SET" -eq 0 ] || FAN_CURVE=$ENV_FAN_CURVE_VALUE
+	[ "$ENV_FAN_HYSTERESIS_SET" -eq 0 ] || FAN_HYSTERESIS=$ENV_FAN_HYSTERESIS_VALUE
+	[ "$ENV_FAN_ARGS_SET" -eq 0 ] || FAN_ARGS=$ENV_FAN_ARGS_VALUE
+	[ "$ENV_CPU_ARGS_SET" -eq 0 ] || CPU_ARGS=$ENV_CPU_ARGS_VALUE
+	[ "$ENV_GPU_ARGS_SET" -eq 0 ] || GPU_ARGS=$ENV_GPU_ARGS_VALUE
+}
 
 load_config() {
 	line=""
@@ -58,6 +78,8 @@ load_config() {
 		case "$key" in
 		PROFILE) [ -z "${PROFILE+x}" ] && PROFILE=$value ;;
 		FAN_ENABLED) [ -z "${FAN_ENABLED+x}" ] && FAN_ENABLED=$value ;;
+		FAN_CURVE) [ -z "${FAN_CURVE+x}" ] && FAN_CURVE=$value ;;
+		FAN_HYSTERESIS) [ -z "${FAN_HYSTERESIS+x}" ] && FAN_HYSTERESIS=$value ;;
 		FAN_ARGS) [ -z "${FAN_ARGS+x}" ] && FAN_ARGS=$value ;;
 		CPU_ARGS) [ -z "${CPU_ARGS+x}" ] && CPU_ARGS=$value ;;
 		GPU_ARGS) [ -z "${GPU_ARGS+x}" ] && GPU_ARGS=$value ;;
@@ -65,8 +87,33 @@ load_config() {
 	done < "$PS5GOV_CONFIG"
 }
 
+load_runtime_config() {
+	reset_runtime_config
+	load_config
+	apply_performance_override
+	apply_profile
+	apply_fan_profile
+}
+
+performance_override_enabled() {
+	[ -r "$PERFORMANCE_STATE" ] || return 1
+	case "$(cat "$PERFORMANCE_STATE" 2>/dev/null)" in
+	1|on|true|performance) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+apply_performance_override() {
+	PERFORMANCE_MODE=0
+	if performance_override_enabled; then
+		PERFORMANCE_MODE=1
+		PROFILE=performance
+		unset CPU_ARGS GPU_ARGS
+	fi
+}
+
 apply_profile() {
-	PROFILE="${PROFILE:-balanced}"
+	PROFILE="${PROFILE:-performance}"
 	case "$PROFILE" in
 	auto)
 		: "${CPU_ARGS:=-i 400 -d 4 -H 40 -M 20 -L 8}"
@@ -91,14 +138,20 @@ apply_profile() {
 }
 
 apply_fan_profile() {
-	FAN_ENABLED="${FAN_ENABLED:-0}"
+	FAN_ENABLED="${FAN_ENABLED:-1}"
 	case "$FAN_ENABLED" in
 	0|1) ;;
 	*)
 		die "invalid FAN_ENABLED=$FAN_ENABLED (use 0 or 1)"
 		;;
 	esac
-	: "${FAN_ARGS:=-i 3000 -H 58 -L 48 -s auto}"
+	: "${FAN_ARGS:=-i 3000 -H 55 -L 45 -s auto}"
+	if [ -n "${FAN_CURVE:-}" ]; then
+		FAN_ARGS="$FAN_ARGS -c $FAN_CURVE"
+	fi
+	if [ -n "${FAN_HYSTERESIS:-}" ]; then
+		FAN_ARGS="$FAN_ARGS -y $FAN_HYSTERESIS"
+	fi
 }
 
 restore_defaults() {
@@ -108,13 +161,11 @@ restore_defaults() {
 	[ -x "$GPU_CTL" ] && "$GPU_CTL" reset >/dev/null 2>&1
 }
 
-load_config
-apply_profile
-apply_fan_profile
+load_runtime_config
 
 if [ "$PRINT_CONFIG" -eq 1 ]; then
-	printf 'PROFILE=%s\nCPU_ARGS=%s\nGPU_ARGS=%s\nFAN_ENABLED=%s\nFAN_ARGS=%s\n' \
-		"$PROFILE" "$CPU_ARGS" "$GPU_ARGS" "$FAN_ENABLED" "$FAN_ARGS"
+	printf 'PROFILE=%s\nPERFORMANCE_MODE=%s\nCPU_ARGS=%s\nGPU_ARGS=%s\nFAN_ENABLED=%s\nFAN_CURVE=%s\nFAN_HYSTERESIS=%s\nFAN_ARGS=%s\n' \
+		"$PROFILE" "$PERFORMANCE_MODE" "$CPU_ARGS" "$GPU_ARGS" "$FAN_ENABLED" "${FAN_CURVE:-}" "${FAN_HYSTERESIS:-}" "$FAN_ARGS"
 	exit 0
 fi
 
@@ -128,34 +179,70 @@ fi
 [ -e /dev/mp1 ] || die "missing /dev/mp1 (required for boost control)"
 [ -e "$SMN_CFG" ] || die "missing $SMN_CFG (required for mailbox access)"
 
-if [ "$FAN_ENABLED" -eq 1 ]; then
-	ps5fan_state=$(systemctl is-active ps5fan.service 2>/dev/null || true)
-	if [ "$ps5fan_state" = "active" ]; then
-		log "warning: ps5fan.service is active and fan policy is also enabled in ps5gov; dual fan control possible."
+check_runtime_config() {
+	[ "$FAN_ENABLED" -ne 1 ] || [ -x "$FAN_GOV" ] || die "missing $FAN_GOV (run 'make' first)"
+	if [ "$FAN_ENABLED" -eq 1 ]; then
+		ps5fan_state=$(systemctl is-active ps5fan.service 2>/dev/null || true)
+		if [ "$ps5fan_state" = "active" ]; then
+			log "warning: ps5fan.service is active and fan policy is also enabled in ps5gov; dual fan control possible."
+		fi
 	fi
-fi
+}
 
 CPU_PID=""
 GPU_PID=""
 FAN_PID=""
-cleanup() {
-	log "stopping..."
+
+stop_governors() {
 	[ -n "$CPU_PID" ] && kill "$CPU_PID" 2>/dev/null
 	[ -n "$GPU_PID" ] && kill "$GPU_PID" 2>/dev/null
 	[ -n "$FAN_PID" ] && kill "$FAN_PID" 2>/dev/null
 	wait 2>/dev/null
+	CPU_PID=""
+	GPU_PID=""
+	FAN_PID=""
+}
+
+start_governors() {
+	check_runtime_config
+	if [ "$FAN_ENABLED" -eq 1 ]; then
+		"$FAN_GOV" $FAN_ARGS &
+		FAN_PID=$!
+	fi
+	"$CPU_GOV" $CPU_ARGS & CPU_PID=$!
+	sleep 1
+	"$GPU_GOV" $GPU_ARGS & GPU_PID=$!
+	log "started profile=$PROFILE performance_mode=$PERFORMANCE_MODE fan_enabled=$FAN_ENABLED fan_pid=$FAN_PID fan_args=\"$FAN_ARGS\" cpu_pid=$CPU_PID cpu_args=\"$CPU_ARGS\" gpu_pid=$GPU_PID gpu_args=\"$GPU_ARGS\""
+}
+
+cleanup() {
+	log "stopping..."
+	stop_governors
 	restore_defaults
 	log "stopped profile=$PROFILE restored=1"
 	exit 0
 }
+
+reload_requested=0
+request_reload() {
+	reload_requested=1
+	log "reload requested"
+	stop_governors
+}
+
 trap cleanup INT TERM
+trap request_reload HUP
 
-[ "$FAN_ENABLED" -ne 1 ] || "$FAN_GOV" $FAN_ARGS & FAN_PID=$!
-"$CPU_GOV" $CPU_ARGS & CPU_PID=$!
-sleep 1
-"$GPU_GOV" $GPU_ARGS & GPU_PID=$!
+start_governors
 
-log "started profile=$PROFILE fan_enabled=$FAN_ENABLED fan_pid=$FAN_PID fan_args=\"$FAN_ARGS\" cpu_pid=$CPU_PID cpu_args=\"$CPU_ARGS\" gpu_pid=$GPU_PID gpu_args=\"$GPU_ARGS\""
-
-wait -n 2>/dev/null || wait
-cleanup
+while :; do
+	wait -n 2>/dev/null || wait
+	if [ "$reload_requested" -eq 1 ]; then
+		reload_requested=0
+		load_runtime_config
+		log "reloading profile=$PROFILE"
+		start_governors
+		continue
+	fi
+	cleanup
+done
