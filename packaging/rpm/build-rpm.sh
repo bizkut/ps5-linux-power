@@ -27,4 +27,4 @@ sed "s/^Version:.*/Version: $VERSION/" "$ROOT/packaging/rpm/ps5-linux-power-dkms
 rpmbuild --define "_topdir $RPMTOP" -ba "$RPMTOP/SPECS/ps5-linux-power.spec"
 rpmbuild --define "_topdir $RPMTOP" -ba "$RPMTOP/SPECS/ps5-linux-power-dkms.spec"
 
-find "$RPMTOP/RPMS" "$RPMTOP/SRPMS" -type f \( -name '*.rpm' \) -exec cp {} "$OUT/" \;
+find "$RPMTOP/RPMS" -type f -name '*.rpm' -exec cp {} "$OUT/" \;

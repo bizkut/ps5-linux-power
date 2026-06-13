@@ -8,6 +8,7 @@ Source0: %{name}-%{version}.tar.gz
 Requires: systemd
 BuildRequires: gcc
 BuildRequires: make
+%global debug_package %{nil}
 
 %description
 CPU/GPU governors, fan policy, trace collection, and manual recovery tools for
@@ -20,7 +21,7 @@ PS5 Linux power control.
 %make_build
 
 %install
-%make_install install-systemd PREFIX=/usr/local SYSCONFDIR=/etc DESTDIR=%{buildroot}
+%make_install install-systemd PREFIX=/usr/local SYSCONFDIR=/etc
 install -d %{buildroot}%{_docdir}/%{name}
 install -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 cp -a docs %{buildroot}%{_docdir}/%{name}/
