@@ -8,6 +8,7 @@ url="https://github.com/bizkut/ps5-linux-power"
 license=('GPL-2.0-only')
 depends=('systemd' 'glibc')
 makedepends=('gcc' 'make')
+options=('!debug')
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')
 
