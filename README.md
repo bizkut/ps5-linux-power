@@ -27,8 +27,9 @@ tools prefer it over direct userspace PCI config-space access.
 ## Quick Install
 
 Prebuilt release packages are available for Debian/Ubuntu, Fedora, and Arch
-systems. Install commands are included in each GitHub Release. Package details
-are documented in [docs/PACKAGING.md](docs/PACKAGING.md).
+systems, including Bazzite through `rpm-ostree`. Install commands are included
+in each GitHub Release. Package details are documented in
+[docs/PACKAGING.md](docs/PACKAGING.md).
 
 Build and install the governor service on the PS5:
 

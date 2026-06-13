@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
-        run: dnf install -y gcc make rpm-build tar gzip findutils
+        run: dnf install -y gcc make rpm-build tar gzip findutils akmods
       - name: Build rpm packages
         run: VERSION="${PACKAGE_VERSION#v}" packaging/rpm/build-rpm.sh
       - uses: actions/upload-artifact@v4

@@ -24,6 +24,8 @@ Current local repo state:
   transports. DKMS packages depend on `dkms`, `gcc`, and `make`, but do not
   depend on distro kernel headers because PS5 custom kernels should provide
   matching headers at `/lib/modules/$(uname -r)/build`.
+- Fedora/Bazzite releases also provide `akmod-ps5-linux-power`, the preferred
+  module package for Bazzite/Fedora Atomic systems.
 - `ps5_gpu_gov` also clamps computed load to `0.0..1.0`; sustained `vkmark`
   showed summed fdinfo counters can report above 100% when multiple DRM fdinfo
   entries overlap.
@@ -201,6 +203,7 @@ Next best work:
 - [x] Local UAPI fallback headers for stripped/custom PS5 Linux images.
 - [x] Packaging scaffolding for Debian/Ubuntu `.deb`, Fedora/RPM `.rpm`, and
       Arch `.pkg.tar.zst` artifacts.
+- [x] Fedora/Bazzite akmods package path for optional kernel transports.
 - [x] GitHub Actions release workflow that builds packages on `v*` tags and
       publishes artifacts with release-note install commands.
 

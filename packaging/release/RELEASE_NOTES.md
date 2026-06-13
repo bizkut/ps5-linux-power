@@ -2,9 +2,9 @@
 
 ## Install
 
-Download the package pair for your distro family from this release. Install both
-the userspace package and the DKMS package with the distro package manager so
-dependencies are resolved automatically.
+Download the packages for your distro family from this release. Install the
+userspace package plus the matching kernel-transport package with the distro
+package manager so dependencies are resolved automatically.
 
 Debian/Ubuntu:
 
@@ -16,6 +16,23 @@ Fedora:
 
 ```sh
 sudo dnf install ./ps5-linux-power-*.rpm ./ps5-linux-power-dkms-*.rpm
+```
+
+Bazzite/Fedora Atomic:
+
+```sh
+sudo rpm-ostree install \
+  ./ps5-linux-power-*.x86_64.rpm \
+  ./akmod-ps5-linux-power-*.noarch.rpm
+
+sudo systemctl reboot
+```
+
+After the reboot:
+
+```sh
+sudo systemctl enable --now ps5gov
+ps5govctl sensors
 ```
 
 Arch:
@@ -33,16 +50,17 @@ ps5govctl sensors
 
 ## Kernel Header Requirement
 
-The DKMS package does not install distro kernel header packages. PS5 Linux users
-normally run custom kernels, and the matching kernel build tree must already be
-provided by that kernel at:
+The DKMS and akmod packages do not install distro kernel header packages. PS5
+Linux users normally run custom kernels, and the matching kernel build tree must
+already be provided by that kernel at:
 
 ```text
 /lib/modules/$(uname -r)/build
 ```
 
 If that path is missing, install or expose the headers for the currently running
-PS5 custom kernel, then reinstall the `ps5-linux-power-dkms` package.
+PS5 custom kernel, then reinstall `ps5-linux-power-dkms` or
+`akmod-ps5-linux-power`.
 
 ## Packages
 
@@ -50,3 +68,5 @@ PS5 custom kernel, then reinstall the `ps5-linux-power-dkms` package.
   documentation.
 - `ps5-linux-power-dkms`: optional `/dev/ps5-smu` and `/dev/ps5-fan` kernel
   transports built through DKMS.
+- `akmod-ps5-linux-power`: Fedora/Bazzite-native alternative to the DKMS
+  package. Prefer this on Bazzite and Fedora Atomic systems.

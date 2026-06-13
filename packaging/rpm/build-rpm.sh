@@ -23,8 +23,11 @@ tar --exclude-vcs --exclude='*/dist' --exclude='*.o' --exclude='*.ko' \
 
 sed "s/^Version:.*/Version: $VERSION/" "$ROOT/packaging/rpm/ps5-linux-power.spec" > "$RPMTOP/SPECS/ps5-linux-power.spec"
 sed "s/^Version:.*/Version: $VERSION/" "$ROOT/packaging/rpm/ps5-linux-power-dkms.spec" > "$RPMTOP/SPECS/ps5-linux-power-dkms.spec"
+sed "s/^Version:.*/Version: $VERSION/" "$ROOT/packaging/rpm/ps5-linux-power-kmod.spec" > "$RPMTOP/SOURCES/ps5-linux-power-kmod.spec"
+sed "s/^Version:.*/Version: $VERSION/" "$ROOT/packaging/rpm/akmod-ps5-linux-power.spec" > "$RPMTOP/SPECS/akmod-ps5-linux-power.spec"
 
 rpmbuild --define "_topdir $RPMTOP" -ba "$RPMTOP/SPECS/ps5-linux-power.spec"
 rpmbuild --define "_topdir $RPMTOP" -ba "$RPMTOP/SPECS/ps5-linux-power-dkms.spec"
+rpmbuild --define "_topdir $RPMTOP" -ba "$RPMTOP/SPECS/akmod-ps5-linux-power.spec"
 
 find "$RPMTOP/RPMS" -type f -name '*.rpm' -exec cp {} "$OUT/" \;
