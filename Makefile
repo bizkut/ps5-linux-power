@@ -15,9 +15,10 @@ endif
 CFLAGS ?= -O2 -Wall -Wextra
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
-LIBDIR ?= $(PREFIX)/lib/ps5-linux-cpuclock
+LIBDIR ?= $(PREFIX)/lib/ps5-linux-power
 SYSCONFDIR ?= /etc
-CONFIGDIR ?= $(SYSCONFDIR)/ps5-linux-cpuclock
+CONFIGDIR ?= $(SYSCONFDIR)/ps5-linux-power
+OLD_CONFIGDIR ?= $(SYSCONFDIR)/ps5-linux-cpuclock
 SYSTEMD_DIR ?= /etc/systemd/system
 INSTALL ?= install
 
@@ -45,11 +46,19 @@ install: all
 		$(INSTALL) -d $(DESTDIR)$(LIBDIR)/dkms/ps5-icc-fan; \
 		$(INSTALL) -m 0755 dkms/ps5-icc-fan/ps5_fanctl $(DESTDIR)$(LIBDIR)/dkms/ps5-icc-fan/ps5_fanctl; \
 	fi
+	@if [ -x dkms/ps5-smu/ps5_smuctl ]; then \
+		$(INSTALL) -d $(DESTDIR)$(LIBDIR)/dkms/ps5-smu; \
+		$(INSTALL) -m 0755 dkms/ps5-smu/ps5_smuctl $(DESTDIR)$(LIBDIR)/dkms/ps5-smu/ps5_smuctl; \
+	fi
 
 install-systemd: install
 	$(INSTALL) -d $(DESTDIR)$(CONFIGDIR)
 	@if [ ! -e "$(DESTDIR)$(CONFIGDIR)/ps5gov.conf" ]; then \
-		$(INSTALL) -m 0644 governors/ps5gov.conf $(DESTDIR)$(CONFIGDIR)/ps5gov.conf; \
+		if [ -e "$(DESTDIR)$(OLD_CONFIGDIR)/ps5gov.conf" ]; then \
+			$(INSTALL) -m 0644 "$(DESTDIR)$(OLD_CONFIGDIR)/ps5gov.conf" "$(DESTDIR)$(CONFIGDIR)/ps5gov.conf"; \
+		else \
+			$(INSTALL) -m 0644 governors/ps5gov.conf "$(DESTDIR)$(CONFIGDIR)/ps5gov.conf"; \
+		fi; \
 	fi
 	$(INSTALL) -d $(DESTDIR)$(SYSTEMD_DIR)
 	$(INSTALL) -m 0644 governors/ps5gov.service $(DESTDIR)$(SYSTEMD_DIR)/ps5gov.service

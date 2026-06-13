@@ -2,10 +2,10 @@
 /*
  * smn.h - userspace SMU MP1 mailbox over PCI config space.
  *
- * Talks to the same mailbox the kernel reaches via amd_smn_read/write, but from
- * userspace: the SMN index/data pair lives in PCI config space of 0000:00:00.0
- * (index @ 0xB8, data @ 0xBC). This is the cyan-skillfish-governor transport,
- * verified working on PS5. Root required (writes /sys/.../config).
+ * Prefer the optional /dev/ps5-smu kernel transport when available. Otherwise
+ * fall back to direct userspace PCI config-space SMN access: the SMN index/data
+ * pair lives in PCI config space of 0000:00:00.0 (index @ 0xB8, data @ 0xBC).
+ * Root required.
  *
  * Serialization: all ps5-power userspace tools take an flock on SMN_LOCK so they
  * don't interleave the (non-atomic) index->data sequence against EACH OTHER.
@@ -22,9 +22,11 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/file.h>
+#include "dkms/ps5-smu/ps5_smu.h"
 
 #define SMN_CFG   "/sys/bus/pci/devices/0000:00:00.0/config"
 #define MP1_DEV   "/dev/mp1"
+#define PS5_SMU_DEV "/dev/ps5-smu"
 #define SMN_LOCK  "/run/lock/ps5-power.lock"
 #define SMN_BOOST_STATE "/run/ps5-power.boost"
 #define SMN_INDEX 0xB8
@@ -64,6 +66,7 @@
 #define SMN_POLL_TRIES 200000
 
 static int smn_fd = -1;
+static int ps5_smu_fd = -1;
 static int smn_lock_fd = -1;
 
 extern int ioctl(int fd, unsigned long request, ...);
@@ -144,14 +147,88 @@ out_unlock:
 
 static int smn_open(void)
 {
+	ps5_smu_fd = open(PS5_SMU_DEV, O_RDWR | O_CLOEXEC);
+	if (ps5_smu_fd >= 0)
+		return 0;
+
 	smn_fd = open(SMN_CFG, O_RDWR);
 	if (smn_fd < 0) {
-		perror("open " SMN_CFG " (need root)");
+		perror("open " PS5_SMU_DEV " or " SMN_CFG " (need root)");
 		return -1;
 	}
 	/* best-effort lock; if it can't be created we still run (unlocked, PoC) */
 	smn_lock_fd = open(SMN_LOCK, O_CREAT | O_RDWR, 0644);
 	return 0;
+}
+
+static int smn_mbox_kernel(uint8_t msg, uint32_t arg, uint32_t *status, uint32_t *val)
+{
+	if (ps5_smu_fd < 0)
+		return -3;
+
+	switch (msg) {
+	case 0x0b:
+	{
+		struct ps5_smu_cpu_pstate req = {
+			.mask = arg & 0xff,
+			.pstate = (arg >> 16) & 0x0f,
+		};
+		if (ioctl(ps5_smu_fd, PS5_SMU_CPU_PSTATE_SET, &req) < 0)
+			return -1;
+		if (status)
+			*status = 1;
+		return 0;
+	}
+	case 0x0c:
+	{
+		struct ps5_smu_cpu_pstate req = {
+			.core = arg & 0xff,
+		};
+		if (ioctl(ps5_smu_fd, PS5_SMU_CPU_PSTATE_GET, &req) < 0)
+			return -1;
+		if (status)
+			*status = 1;
+		if (val)
+			*val = req.pstate;
+		return 0;
+	}
+	case 0x0e:
+	{
+		struct ps5_smu_gfxclk req = { .mhz = arg };
+		if (ioctl(ps5_smu_fd, PS5_SMU_GFXCLK_SET, &req) < 0)
+			return -1;
+		if (status)
+			*status = 1;
+		return 0;
+	}
+	case 0x0f:
+	{
+		struct ps5_smu_gfxclk req = {};
+		if (ioctl(ps5_smu_fd, PS5_SMU_GFXCLK_GET, &req) < 0)
+			return -1;
+		if (status)
+			*status = 1;
+		if (val)
+			*val = req.mhz;
+		return 0;
+	}
+	case 0x36:
+	case 0x37:
+	{
+		struct ps5_smu_voltage req = {
+			.rail = msg == 0x36 ? PS5_SMU_VOLTAGE_CPU : PS5_SMU_VOLTAGE_GPU,
+		};
+		if (ioctl(ps5_smu_fd, PS5_SMU_VOLTAGE_GET, &req) < 0)
+			return -1;
+		if (status)
+			*status = 1;
+		if (val)
+			*val = req.millivolts;
+		return 0;
+	}
+	default:
+		return -3;
+	}
 }
 
 static int smn_wait_nz(uint32_t reg, uint32_t *out)
@@ -182,6 +259,10 @@ static int smn_mbox(uint32_t cmd, uint32_t rsp, uint32_t areg,
 {
 	uint32_t s = 0, v = 0;
 	int ret = 0;
+
+	ret = smn_mbox_kernel(msg, arg, status, val);
+	if (ret != -3)
+		return ret;
 
 	if (smn_lock_fd >= 0)
 		flock(smn_lock_fd, LOCK_EX);
