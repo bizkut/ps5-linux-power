@@ -41,7 +41,7 @@ sudo systemctl enable --now ps5gov
 ps5govctl sensors
 ```
 
-### Arch
+### Arch/CachyOS
 
 ```sh
 sudo pacman -U ps5-linux-power-*.pkg.tar.zst ps5-linux-power-dkms-*.pkg.tar.zst
