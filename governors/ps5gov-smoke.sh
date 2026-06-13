@@ -53,6 +53,7 @@ done
 run_check "ps5govctl syntax" sh -n "$CTL"
 run_check "run-governors syntax" sh -n "$RUNNER"
 run_check "ps5gov-trace syntax" sh -n "$DIR/ps5gov-trace.sh"
+run_check "ps5gov-collect-trace syntax" sh -n "$DIR/ps5gov-collect-trace.sh"
 run_check "ps5gov-fan-validate syntax" sh -n "$DIR/ps5gov-fan-validate.sh"
 
 for exe in "$DIR/ps5_cpu_gov" "$DIR/ps5_gpu_gov" "$DIR/ps5_fan_gov" \

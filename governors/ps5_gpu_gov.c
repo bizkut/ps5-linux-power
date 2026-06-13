@@ -10,7 +10,7 @@
  *
  * Policy: compute a moving target inside the requested frequency range, up to
  * 2000 MHz normally or 2230 MHz with boost.
- * Thermal guard: staged cap. Warm disables boost, hot caps at 1500, critical caps at 1200.
+ * Thermal guard: gradual max-frequency reduction above the threshold.
  * Ramp UP is rate-limited; burst mode uses a larger step. Ramp DOWN needs
  * `down_count` consecutive low samples.
  * On SIGINT/SIGTERM: leave boost mode, restore 2000 MHz, and exit.
@@ -80,7 +80,7 @@ static int apply_preset(const char *preset)
 		up_high = 0.30; up_mid = 0.12; up_low = 0.03;
 		adjust_mhz = 30; step_mhz = 220; burst_step_mhz = 700; burst_samples = 2;
 		range_min_mhz = G_LOW; range_max_mhz = G_BOOST;
-		throttle_temp = 90; recovery_temp = 80;
+		throttle_temp = 85; recovery_temp = 75;
 		temp_source = "auto"; load_method = "fdinfo";
 		return 0;
 	}
@@ -408,9 +408,7 @@ static int read_gpu_temp(void)
 static uint32_t cap_to_mhz(int cap)
 {
 	switch (cap) {
-	case 1: return G_LOW;
-	case 2: return G_MID;
-	case 3: return G_MAX;
+	case 1: return G_MAX;
 	default: return G_BOOST;
 	}
 }
@@ -497,6 +495,7 @@ int main(int argc, char **argv)
 	int boost_on = 0, boost_changed, thermal_cap = 0;
 	int hold_logs = 0;
 	uint32_t cur_mhz = G_MAX, target_mhz = G_MAX;
+	uint32_t thermal_max_mhz = 0;
 	unsigned long long pg, g;
 	struct timespec pt, t, ts;
 
@@ -543,6 +542,7 @@ int main(int argc, char **argv)
 
 	smn_boost_vote(SMN_BOOST_GPU, 0);
 	set_gfx(G_MAX);
+	thermal_max_mhz = range_max_mhz;
 	pg = sum_gfx_ns();
 	clock_gettime(CLOCK_MONOTONIC, &pt);
 	if (verbose)
@@ -583,26 +583,32 @@ int main(int argc, char **argv)
 		int temp = read_gpu_temp();
 		int next_cap = thermal_cap;
 		if (temp >= 0) {
-			if (temp >= throttle_temp + 5)
+			if (temp > throttle_temp) {
+				uint32_t min_thermal_mhz = range_min_mhz < G_MAX ? range_min_mhz : G_MAX;
+
 				next_cap = 1;
-			else if (temp >= throttle_temp)
-				next_cap = 2;
-			else if (temp >= recovery_temp)
-				next_cap = 3;
-			else
+				if (!thermal_cap && thermal_max_mhz > G_MAX)
+					thermal_max_mhz = G_MAX;
+				else if (thermal_max_mhz > min_thermal_mhz + (uint32_t)adjust_mhz)
+					thermal_max_mhz -= (uint32_t)adjust_mhz;
+				else
+					thermal_max_mhz = min_thermal_mhz;
+			} else if (temp < recovery_temp) {
 				next_cap = 0;
+				thermal_max_mhz = range_max_mhz;
+			}
 		}
 		if (next_cap != thermal_cap) {
 			thermal_cap = next_cap;
 			if (verbose)
 				printf("gpu event=thermal temp=%dC cap_level=%d cap_mhz=%u\n",
-				       temp, thermal_cap, cap_to_mhz(thermal_cap));
+				       temp, thermal_cap, thermal_cap ? thermal_max_mhz : cap_to_mhz(thermal_cap));
 		}
 
 		int high_load = load >= up_high;
 		int burst = load >= 0.99 || (burst_samples > 0 && burst_streak >= burst_samples);
 		uint32_t requested_max = high_load ? range_max_mhz : clamp_mhz(range_max_mhz, range_min_mhz, G_MAX);
-		uint32_t cap_mhz = thermal_cap ? cap_to_mhz(thermal_cap) : requested_max;
+		uint32_t cap_mhz = thermal_cap ? thermal_max_mhz : requested_max;
 		uint32_t min_mhz = thermal_cap && cap_mhz < range_min_mhz ? cap_mhz : range_min_mhz;
 		uint32_t max_mhz = clamp_mhz(cap_mhz, min_mhz, requested_max);
 		uint32_t desired_mhz = desired_mhz_for_load(load, max_mhz);

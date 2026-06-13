@@ -10,7 +10,7 @@ CPPFLAGS += -idirafter $(KERNEL_UAPI)
 endif
 CFLAGS ?= -O2 -Wall -Wextra
 PREFIX ?= /usr/local
-LIBDIR ?= $(PREFIX)/lib/ps5-linux-cpuclock
+LIBDIR ?= $(PREFIX)/lib/ps5-linux-power
 INSTALL ?= install
 
 GOVS := ps5_cpu_gov ps5_gpu_gov ps5_fan_gov
@@ -25,7 +25,7 @@ clean:
 
 install: all
 	$(INSTALL) -d $(DESTDIR)$(LIBDIR)/governors
-	$(INSTALL) -m 0755 $(GOVS) run-governors.sh ps5govctl ps5gov-smoke.sh ps5gov-trace.sh ps5gov-fan-validate.sh $(DESTDIR)$(LIBDIR)/governors/
+	$(INSTALL) -m 0755 $(GOVS) run-governors.sh ps5govctl ps5gov-smoke.sh ps5gov-trace.sh ps5gov-collect-trace.sh ps5gov-fan-validate.sh $(DESTDIR)$(LIBDIR)/governors/
 	$(INSTALL) -m 0644 ps5gov.conf $(DESTDIR)$(LIBDIR)/governors/
 
 .PHONY: all clean install

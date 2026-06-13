@@ -8,14 +8,18 @@
  * P-state changes, so at steady idle there is zero mailbox traffic.
  *
  * Policy: load >= 0.40 -> boost + P0 (3200+) ; >= 0.20 -> P2 (2327) ;
- *         >= 0.08 -> P5 (1600) ; else -> P7 (800).
+ *         >= 0.08 -> P5 (1600) ; else -> P7 (800). Shared thermal policy
+ *         clamps the fastest allowed P-state when the APU is hot.
  * Ramp UP immediate; ramp DOWN needs `down_count` consecutive low samples.
  * On SIGINT/SIGTERM: leave boost mode, restore P0, and exit.
  *
  * Run as root. Do NOT run a kernel mailbox module or ps5boost concurrently.
  *
- * Usage: ps5_cpu_gov [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-v]
+ * Usage: ps5_cpu_gov [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-T hot] [-R recovery] [-C critical] [-S source] [-v]
  */
+#include <dirent.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,6 +39,8 @@
 
 static double up_high = 0.40, up_mid = 0.20, up_low = 0.08;
 static int interval_ms = 500, down_count = 6, verbose, log_every = 10;
+static int hot_temp = 85, recovery_temp = 75, critical_temp = 90;
+static const char *temp_source = "auto";
 static volatile sig_atomic_t stop;
 
 static void on_signal(int s) { (void)s; stop = 1; }
@@ -46,15 +52,26 @@ static double parse_load_arg(const char *s)
 	return v > 1.0 ? v / 100.0 : v;
 }
 
+static int path_printf(char *buf, size_t len, const char *fmt, const char *a, const char *b)
+{
+	int n = snprintf(buf, len, fmt, a, b);
+
+	return n < 0 || n >= (int)len ? -1 : 0;
+}
+
 static int validate_args(const char *prog)
 {
 	if (interval_ms < 50 || down_count < 1 ||
 	    up_high <= 0.0 || up_mid <= 0.0 || up_low <= 0.0 ||
 	    up_high > 1.0 || up_mid > 1.0 || up_low > 1.0 ||
 	    log_every < 1 ||
-	    !(up_high > up_mid && up_mid > up_low)) {
+	    !(up_high > up_mid && up_mid > up_low) ||
+	    hot_temp < 1 || hot_temp > 110 ||
+	    recovery_temp < 1 || recovery_temp >= hot_temp ||
+	    critical_temp < hot_temp || critical_temp > 110 ||
+	    (strcmp(temp_source, "auto") && strcmp(temp_source, "gpu") && strcmp(temp_source, "k10temp"))) {
 		fprintf(stderr,
-			"usage: %s [-i ms>=50] [-d downcount>=1] [-H high] [-M mid] [-L low] [-v] [-q hold_samples>=1]\n",
+			"usage: %s [-i ms>=50] [-d downcount>=1] [-H high] [-M mid] [-L low] [-T hot_c] [-R recovery_c] [-C critical_c] [-S auto|gpu|k10temp] [-v] [-q hold_samples>=1]\n",
 			prog);
 		return -1;
 	}
@@ -79,6 +96,178 @@ static int read_cpu(unsigned long long *busy, unsigned long long *total)
 	return 0;
 }
 
+static int read_temp_file(const char *path)
+{
+	char buf[32];
+	int fd = open(path, O_RDONLY);
+	ssize_t r;
+
+	if (fd < 0)
+		return -1;
+	r = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (r <= 0)
+		return -1;
+	buf[r] = 0;
+	return atoi(buf) / 1000;
+}
+
+static int read_id_file(const char *path, const char *expected)
+{
+	char buf[32];
+	int fd = open(path, O_RDONLY);
+	ssize_t r;
+
+	if (fd < 0)
+		return 0;
+	r = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (r <= 0)
+		return 0;
+	buf[r] = 0;
+	return !strncmp(buf, expected, strlen(expected));
+}
+
+static int read_hwmon_name(const char *hwmon, char *buf, size_t len)
+{
+	char path[256];
+	int fd;
+	ssize_t r;
+
+	if (path_printf(path, sizeof(path), "%s/%s", hwmon, "name"))
+		return -1;
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return -1;
+	r = read(fd, buf, len - 1);
+	close(fd);
+	if (r <= 0)
+		return -1;
+	buf[r] = 0;
+	buf[strcspn(buf, "\n")] = 0;
+	return 0;
+}
+
+static int read_named_hwmon_temp(const char *name)
+{
+	DIR *root = opendir("/sys/class/hwmon");
+	struct dirent *de;
+	char hwmon[256], hwmon_name[64], temp_path[320];
+	int temp = -1;
+
+	if (!root)
+		return -1;
+
+	while ((de = readdir(root))) {
+		if (strncmp(de->d_name, "hwmon", 5))
+			continue;
+		if (path_printf(hwmon, sizeof(hwmon), "%s/%s", "/sys/class/hwmon", de->d_name))
+			continue;
+		if (read_hwmon_name(hwmon, hwmon_name, sizeof(hwmon_name)) || strcmp(hwmon_name, name))
+			continue;
+		if (path_printf(temp_path, sizeof(temp_path), "%s/%s", hwmon, "temp1_input"))
+			continue;
+		temp = read_temp_file(temp_path);
+		if (temp >= 0)
+			break;
+	}
+
+	closedir(root);
+	return temp;
+}
+
+static int is_amd_card(const char *card)
+{
+	char path[256];
+
+	if (path_printf(path, sizeof(path), "/sys/class/drm/%s/%s", card, "device/vendor"))
+		return 0;
+	return read_id_file(path, "0x1002");
+}
+
+static int is_ps5_gpu_card(const char *card)
+{
+	char path[256];
+
+	if (!is_amd_card(card))
+		return 0;
+	if (path_printf(path, sizeof(path), "/sys/class/drm/%s/%s", card, "device/device"))
+		return 0;
+	return read_id_file(path, "0x13fb");
+}
+
+static int read_card_temp(const char *card)
+{
+	char hwmon_path[256], temp_path[320];
+	DIR *hwmon;
+	struct dirent *h;
+	int temp = -1;
+
+	if (path_printf(hwmon_path, sizeof(hwmon_path), "/sys/class/drm/%s/%s", card, "device/hwmon"))
+		return -1;
+	hwmon = opendir(hwmon_path);
+	if (!hwmon)
+		return -1;
+
+	while ((h = readdir(hwmon))) {
+		if (strncmp(h->d_name, "hwmon", 5))
+			continue;
+		if (path_printf(temp_path, sizeof(temp_path), "%s/%s/temp1_input", hwmon_path, h->d_name))
+			continue;
+		temp = read_temp_file(temp_path);
+		if (temp >= 0)
+			break;
+	}
+	closedir(hwmon);
+	return temp;
+}
+
+static int read_drm_gpu_temp(void)
+{
+	DIR *drm = opendir("/sys/class/drm");
+	struct dirent *card;
+	char fallback_card[NAME_MAX + 1] = "";
+	int amd_cards = 0, temp = -1;
+
+	if (!drm)
+		return -1;
+
+	while ((card = readdir(drm))) {
+		if (strncmp(card->d_name, "card", 4) || strchr(card->d_name, '-'))
+			continue;
+		if (is_ps5_gpu_card(card->d_name)) {
+			temp = read_card_temp(card->d_name);
+			if (temp >= 0)
+				break;
+		}
+		if (is_amd_card(card->d_name)) {
+			amd_cards++;
+			if (strlen(card->d_name) < sizeof(fallback_card))
+				strcpy(fallback_card, card->d_name);
+		}
+	}
+
+	closedir(drm);
+	if (temp < 0 && amd_cards == 1 && fallback_card[0])
+		temp = read_card_temp(fallback_card);
+	return temp;
+}
+
+static int read_apu_temp(void)
+{
+	int temp = -1;
+
+	if (!strcmp(temp_source, "gpu"))
+		return read_drm_gpu_temp();
+	if (!strcmp(temp_source, "k10temp"))
+		return read_named_hwmon_temp("k10temp");
+
+	temp = read_drm_gpu_temp();
+	if (temp < 0)
+		temp = read_named_hwmon_temp("k10temp");
+	return temp;
+}
+
 static int set_pstate(uint32_t pstate)
 {
 	uint32_t arg = (MASK_ALL & 0xff) | ((pstate & 0x0f) << 16), st = 0;
@@ -94,8 +283,28 @@ static const char *mhz(uint32_t p)
 	return (p < 8) ? tbl[p] : "?";
 }
 
+static uint32_t thermal_min_pstate_for_temp(int temp, int *thermal_cap)
+{
+	if (temp < 0)
+		return *thermal_cap ? (*thermal_cap >= 2 ? P_MID : 1) : P_MAX;
+	if (temp >= critical_temp) {
+		*thermal_cap = 2;
+		return P_MID;
+	}
+	if (temp >= hot_temp) {
+		*thermal_cap = 1;
+		return 1;
+	}
+	if (temp < recovery_temp) {
+		*thermal_cap = 0;
+		return P_MAX;
+	}
+	return *thermal_cap ? (*thermal_cap >= 2 ? P_MID : 1) : P_MAX;
+}
+
 static void write_status(double load, uint32_t current, uint32_t target,
-			 uint32_t demand, int boost, int low_streak)
+			 uint32_t demand, uint32_t raw_demand, int temp,
+			 int thermal_cap, uint32_t max_pstate, int boost, int low_streak)
 {
 	char tmp[] = STATUS_PATH ".tmp";
 	FILE *f = fopen(tmp, "w");
@@ -109,6 +318,12 @@ static void write_status(double load, uint32_t current, uint32_t target,
 	fprintf(f, "target_mhz=%s\n", mhz(target));
 	fprintf(f, "demand_pstate=%u\n", demand);
 	fprintf(f, "demand_mhz=%s\n", mhz(demand));
+	fprintf(f, "raw_demand_pstate=%u\n", raw_demand);
+	fprintf(f, "raw_demand_mhz=%s\n", mhz(raw_demand));
+	fprintf(f, "temperature_c=%d\n", temp);
+	fprintf(f, "thermal_cap=%d\n", thermal_cap);
+	fprintf(f, "max_pstate=%u\n", max_pstate);
+	fprintf(f, "max_mhz=%s\n", mhz(max_pstate));
 	fprintf(f, "boost=%d\n", boost);
 	fprintf(f, "low_streak=%d\n", low_streak);
 	fclose(f);
@@ -118,23 +333,27 @@ static void write_status(double load, uint32_t current, uint32_t target,
 int main(int argc, char **argv)
 {
 	int opt, low_streak = 0;
-	int boost_on = 0;
+	int boost_on = 0, thermal_cap = 0;
 	int hold_logs = 0;
 	unsigned long long pb = 0, pt = 0, b, t;
 	uint32_t current = P_MAX, target;
 	struct timespec ts;
 
-	while ((opt = getopt(argc, argv, "i:d:H:M:L:vq:")) != -1) {
+	while ((opt = getopt(argc, argv, "i:d:H:M:L:T:R:C:S:vq:")) != -1) {
 		switch (opt) {
 		case 'i': interval_ms = atoi(optarg); break;
 		case 'd': down_count = atoi(optarg); break;
 		case 'H': up_high = parse_load_arg(optarg); break;
 		case 'M': up_mid = parse_load_arg(optarg); break;
 		case 'L': up_low = parse_load_arg(optarg); break;
+		case 'T': hot_temp = atoi(optarg); break;
+		case 'R': recovery_temp = atoi(optarg); break;
+		case 'C': critical_temp = atoi(optarg); break;
+		case 'S': temp_source = optarg; break;
 		case 'v': verbose = 1; break;
 		case 'q': log_every = atoi(optarg); break;
 		default:
-			fprintf(stderr, "usage: %s [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-v] [-q hold_samples]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-i ms] [-d downcount] [-H high] [-M mid] [-L low] [-T hot_c] [-R recovery_c] [-C critical_c] [-S auto|gpu|k10temp] [-v] [-q hold_samples]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -154,8 +373,9 @@ int main(int argc, char **argv)
 	current = P_MAX;
 	read_cpu(&pb, &pt);
 	if (verbose)
-		printf("ps5_cpu_gov: started, interval=%dms down_count=%d log_every=%d load=%.0f/%.0f/%.0f%%\n",
-		       interval_ms, down_count, log_every, up_high * 100, up_mid * 100, up_low * 100);
+		printf("ps5_cpu_gov: started, interval=%dms down_count=%d log_every=%d load=%.0f/%.0f/%.0f%% thermal=%d/%d/%dC temp_source=%s\n",
+		       interval_ms, down_count, log_every, up_high * 100, up_mid * 100, up_low * 100,
+		       recovery_temp, hot_temp, critical_temp, temp_source);
 
 	while (!stop) {
 		ts.tv_sec = interval_ms / 1000;
@@ -167,11 +387,21 @@ int main(int argc, char **argv)
 		double load = (t > pt) ? (double)(b - pb) / (double)(t - pt) : 0.0;
 		pb = b; pt = t;
 
-		uint32_t demand;
+		uint32_t demand, raw_demand, max_pstate;
 		if (load >= up_high)      demand = P_MAX;
 		else if (load >= up_mid)  demand = P_MID;
 		else if (load >= up_low)  demand = P_LOW;
 		else                      demand = P_IDLE;
+		raw_demand = demand;
+
+		int temp = read_apu_temp();
+		int prev_cap = thermal_cap;
+		max_pstate = thermal_min_pstate_for_temp(temp, &thermal_cap);
+		if (demand < max_pstate)
+			demand = max_pstate;
+		if (verbose && thermal_cap != prev_cap)
+			printf("cpu event=thermal temp=%dC cap_level=%d max=P%u(%s)\n",
+			       temp, thermal_cap, max_pstate, mhz(max_pstate));
 
 		if (demand < current) {            /* wants more MHz -> jump up */
 			target = demand;
@@ -190,7 +420,7 @@ int main(int argc, char **argv)
 			low_streak = 0;
 		}
 
-		if (demand == P_MAX && !boost_on) {
+		if (demand == P_MAX && !thermal_cap && !boost_on) {
 			if (smn_boost_vote(SMN_BOOST_CPU, 1) == 0) {
 				boost_on = 1;
 				if (verbose)
@@ -211,7 +441,7 @@ int main(int argc, char **argv)
 			       load * 100, current, mhz(current), boost_on);
 		}
 
-		if (demand != P_MAX && boost_on) {
+		if ((demand != P_MAX || thermal_cap) && boost_on) {
 			if (smn_boost_vote(SMN_BOOST_CPU, 0) == 0) {
 				boost_on = 0;
 				if (verbose)
@@ -219,7 +449,8 @@ int main(int argc, char **argv)
 			}
 		}
 
-		write_status(load, current, target, demand, boost_on, low_streak);
+		write_status(load, current, target, demand, raw_demand, temp,
+			     thermal_cap, max_pstate, boost_on, low_streak);
 	}
 
 	set_pstate(P_MAX);
