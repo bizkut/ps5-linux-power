@@ -1,9 +1,9 @@
 # Technical Notes
 
 This document holds the lower-level details that are useful when developing,
-tuning, or debugging `ps5-linux-cpuclock`.
+tuning, or debugging `ps5-linux-power`.
 
-For normal install and profile use, start with [README.md](README.md).
+For normal install and profile use, start with [README.md](../README.md).
 
 ## Project Role
 
@@ -23,8 +23,13 @@ The long-term production target is the kernel driver/patch stack carried by
 
 ## Safety Model
 
-The userspace tools talk to the SMU MP1 mailbox through PCI config-space SMN
-index/data registers on `0000:00:00.0`.
+The userspace tools prefer the optional `/dev/ps5-smu` DKMS transport when it is
+loaded. That transport owns the SMN mailbox path in kernel space, uses the
+kernel-exported AMD SMN helpers, and exposes only curated ioctls for the
+validated commands.
+
+Without `/dev/ps5-smu`, the tools fall back to talking to the SMU MP1 mailbox
+through PCI config-space SMN index/data registers on `0000:00:00.0`.
 
 The tools serialize against each other with:
 
@@ -33,12 +38,12 @@ The tools serialize against each other with:
 ```
 
 That prevents two userspace policy writers from colliding with each other, but
-it does not take the kernel's internal SMN lock. Kernel users such as `k10temp`
-or EDAC may still touch SMN at the same time. This is the main reason this
-remains a userspace proof of concept instead of the final production mechanism.
+in fallback mode it does not take the kernel's internal SMN lock. Kernel users
+such as `k10temp` or EDAC may still touch SMN at the same time. This is the main
+reason the kernel transport is preferred.
 
-The kernel driver version should use kernel SMN helpers/locking and expose stable
-interfaces for clock, boost, fan, and telemetry control.
+The production driver version should use kernel SMN helpers/locking and expose
+stable interfaces for clock, boost, fan, and telemetry control.
 
 ## Performance Impact
 
@@ -70,6 +75,11 @@ The top-level `make` builds:
 - `governors/ps5_cpu_gov`
 - `governors/ps5_gpu_gov`
 - `governors/ps5_fan_gov`
+
+Optional DKMS modules live under `dkms/`:
+
+- `dkms/ps5-smu`: curated `/dev/ps5-smu` SMU mailbox transport.
+- `dkms/ps5-icc-fan`: curated `/dev/ps5-fan` EMC fan interface.
 
 The repo carries small fallback UAPI headers for stripped/custom PS5 Linux
 images. If the target libc headers are missing Linux UAPI pieces such as
@@ -173,19 +183,28 @@ Runtime CPU/GPU governor state is written to:
 `ps5govctl sensors` prints those fields with `cpu_state_` and `gpu_state_`
 prefixes.
 
+The CPU governor also participates in shared thermal management because CPU and
+GPU heat use the same SoC cooling path. It reads GPU hwmon temperature when
+available, falls back to `k10temp`, and accepts `-S auto|gpu|k10temp`. Defaults
+are `-T 85 -R 75 -C 90`: below `75 C` normal load policy is restored, at `85 C`
+the fastest allowed CPU state becomes P1/2560, and at `90 C` it becomes
+P2/2327. CPU boost is not requested while a thermal cap is active. The CPU state
+file exposes both raw demand and thermally clamped demand so traces can show
+whether performance was load-limited or temperature-limited.
+
 ## Runtime Reload and Overrides
 
 `ps5govctl profile <name>` writes:
 
 ```text
-/etc/ps5-linux-cpuclock/ps5gov.conf
+/etc/ps5-linux-power/ps5gov.conf
 ```
 
 Then it reloads the running service. Reload keeps the parent service process
 alive, re-reads config, and replaces the CPU/GPU/fan child governors with freshly
 merged arguments. Use `restart` when you want a full systemd stop/start.
 
-`ps5govctl performance on` is a Cyan-style runtime override. It writes:
+`ps5govctl performance on` is a runtime override. It writes:
 
 ```text
 /run/ps5-power.performance
@@ -236,7 +255,7 @@ falls back to the older `/dev/icc` pattern ioctl otherwise.
 Fan curves are optional and provisional until tuned on real hardware:
 
 ```sh
-FAN_CURVE="45:62:0,50:58:0,58:55:1,65:52:1,72:48:1"
+FAN_CURVE="45:78:0,60:74:0,72:70:1,82:68:1,88:66:1"
 FAN_HYSTERESIS=4
 ```
 
@@ -262,10 +281,13 @@ For target-side tuning traces:
 
 ```sh
 sudo governors/ps5gov-trace.sh -d 300 -i 1
+sudo governors/ps5gov-collect-trace.sh -d 1800 -i 1 -n "game scene"
 ```
 
 The trace CSV records hottest hwmon temperature, optional EMC zone temperatures
 from `/dev/ps5-fan`, CPU/GPU/fan runtime state, boost state, and service state.
+The collect wrapper stores the CSV plus config/sensor snapshots in a persistent
+bundle under `~/ps5gov-traces` for users to send back.
 
 For DKMS fan behavior validation:
 

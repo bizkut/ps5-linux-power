@@ -8,7 +8,7 @@ OUT_DIR=/tmp/ps5gov-traces
 NOTE="${PS5GOV_TRACE_NOTE:-}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
-TOOLS_DIR="${PS5GOV_TOOLS_DIR:-/usr/local/lib/ps5-linux-cpuclock}"
+TOOLS_DIR="${PS5GOV_TOOLS_DIR:-/usr/local/lib/ps5-linux-power}"
 if [ -n "${PS5_FANCTL:-}" ]; then
 	FANCTL=$PS5_FANCTL
 elif [ -x "$ROOT/dkms/ps5-icc-fan/ps5_fanctl" ]; then

@@ -24,6 +24,16 @@ standalone fan services before testing these tools directly.
 make           # gcc only -> ps5_cpu, ps5_df, ps5_gpu, governors/ps5_*_gov
 ```
 
+Optional safer SMU transport:
+```sh
+make -C dkms/ps5-smu
+make -C dkms/ps5-smu userspace
+sudo insmod dkms/ps5-smu/ps5_smu.ko
+sudo dkms/ps5-smu/validate.sh
+```
+When `/dev/ps5-smu` exists, the CPU/GPU tools and governors prefer it over the
+direct userspace PCI config-space fallback.
+
 ## Read everything (safe, no writes)
 ```sh
 sudo ./ps5_cpu get 0     # core 0: P0 | cpu rail ~974 mV, gpu rail ~993 mV
@@ -65,11 +75,13 @@ you try with `force`, but don't unless you're ready to reboot.
 Drive the clocks by load. CPU uses fixed P-state tiers; GPU uses a moving target
 frequency with burst ramping. Ramp down uses hysteresis. The governors enter
 `/dev/mp1` boost mode at the top load tier and restore normal full clock on
-Ctrl+C. The GPU governor uses staged thermal caps: with the default performance
-profile, `80 C` clears boost and limits the normal path to about `2000 MHz`,
-`90 C` caps to `1500 MHz`, and `95 C` caps to `1200 MHz`; below `80 C`, normal
-boost behavior resumes. It uses GPU hwmon when available and falls back to
-`k10temp` on kernels without AMDGPU temperature.
+Ctrl+C. The GPU governor uses gradual max-frequency reduction: with the default
+performance profile, temps above `85 C` clear boost, start from about
+`2000 MHz`, and then lower the allowed max while the GPU remains hot; below
+`75 C`, normal boost behavior resumes. The CPU governor uses the same shared APU
+temperature style: at `85 C` it caps the fastest CPU state to P1/2560, at
+`90 C` to P2/2327, and below `75 C` it restores normal CPU policy. Both default
+to GPU hwmon temperature when available and fall back to `k10temp`.
 ```sh
 cd governors
 sudo ./ps5_cpu_gov -v               # CPU only, verbose (Ctrl+C to stop)
@@ -82,6 +94,8 @@ Load thresholds: `-H <percent>` high, `-M <percent>` mid, `-L <percent>` low.
 GPU-only: `-P auto|quiet|balanced|performance` selects a built-in preset.
 `performance` is the default service profile for gaming; `auto` currently aliases
 `balanced`.
+CPU thermal options: `-T <C>` hot cap temperature, `-R <C>` recovery
+temperature, `-C <C>` critical cap temperature, `-S auto|gpu|k10temp`.
 `-A <MHz>` significant-change threshold, `-U <MHz>` normal ramp step,
 `-b <MHz>` burst ramp step, `-B <n>` high-load samples before burst,
 `-n <MHz>` minimum GPU target, `-x <MHz>` maximum GPU target,
@@ -107,7 +121,7 @@ sudo ps5govctl performance off
 ps5govctl performance status
 ps5govctl config
 ```
-`performance on` is a Cyan-style runtime override: it forces the `performance`
+`performance on` is a runtime override: it forces the `performance`
 profile through `/run/ps5-power.performance` without rewriting the persistent
 config. `performance off` reloads back to the configured profile.
 `ps5gov.service` conflicts with `ps5boost.service`; don't run two MP1 power
@@ -117,11 +131,14 @@ Target smoke checks:
 ```sh
 governors/ps5gov-smoke.sh
 sudo governors/ps5gov-smoke.sh --service
+sudo governors/ps5gov-collect-trace.sh -d 1800 -i 1 -n "game scene"
 ```
 The default mode checks local build/config/sensor plumbing. `--service` reloads
 systemd, restarts `ps5gov.service`, reads sensors, then restores defaults.
+`ps5gov-collect-trace.sh` writes a persistent trace bundle under
+`~/ps5gov-traces` for sharing tuning data.
 
-`FAN_ENABLED=1` is the default in `/etc/ps5-linux-cpuclock/ps5gov.conf` and
+`FAN_ENABLED=1` is the default in `/etc/ps5-linux-power/ps5gov.conf` and
 switches the EMC fan servo pattern with hysteresis. The default fan sensor mode is
 `auto`, which tracks the hottest readable hwmon temperature, writes
 `/run/ps5-power.fan`, and restores the default fan pattern when the service
@@ -134,6 +151,9 @@ With the default `FAN_ARGS="-i 3000 -H 55 -L 45 -s auto"`, the governor keeps th
 default pattern below 55 C, switches to the cool pattern at 55 C, and restores the
 default pattern below 45 C. Stop/disable other fan policy daemons such as
 `ps5fan.service` so only one process owns `/dev/icc` fan control.
+The installed default curve is
+`FAN_CURVE="45:78:0,60:74:0,72:70:1,82:68:1,88:66:1"` with
+`FAN_HYSTERESIS=4`.
 
 ## Undo / restore defaults
 ```sh
@@ -144,8 +164,12 @@ sudo ./ps5_df  set 3 force   # DF  -> df3   (only if you changed it)
 A reboot also restores everything to defaults.
 
 ## Troubleshooting
-- **"open … config (need root)"** → run with `sudo`.
-- **status `0xFC` / "busy" / hangs** → the mailbox is stuck (almost always a DF
-  write). Reboot.
-- **values don't change** → something else is driving the mailbox (the `ps5gov`
-  service, a module CLI, or `ps5boost`). Stop it first.
+
+| Problem | What to do |
+| --- | --- |
+| `need root` or `open ... config` | Run the command with `sudo`. |
+| Values do not change | Stop other mailbox owners such as `ps5gov`, module CLIs, or `ps5boost`, then retry. |
+| Status `0xFC`, mailbox busy, or hangs | Stop competing tools; reboot if the mailbox is wedged. DF writes are the usual cause. |
+| Fan policy conflicts | Disable older `ps5fan.service` and let `ps5gov` own fan policy. |
+| GPU does not ramp in a test | Use a real game/benchmark with fdinfo-visible GPU load. |
+| Trace has no EMC zone temperatures | Build/install the optional DKMS fan helper, then reinstall: `make -C dkms/ps5-icc-fan userspace && sudo make install-systemd`. |

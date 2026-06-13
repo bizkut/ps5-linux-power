@@ -12,9 +12,9 @@ Current local repo state:
 
 - Branch: `main`.
 - Latest commit: `d9c3955 governors: default to gaming performance policy`.
-- Working tree has source/doc changes that expose GPU load-sampler diagnostics:
-  `PLAN.md`, `governors/README.md`, `governors/ps5_gpu_gov.c`, and
-  `governors/ps5gov-trace.sh`.
+- Working tree has source/doc changes for the `ps5-linux-power` rename,
+  `docs/` layout, fan curve tuning, CPU thermal cooperation, and the optional
+  `dkms/ps5-smu` transport.
 - `ps5_gpu_gov` also clamps computed load to `0.0..1.0`; sustained `vkmark`
   showed summed fdinfo counters can report above 100% when multiple DRM fdinfo
   entries overlap.
@@ -35,19 +35,19 @@ Current local repo state:
   `/usr/lib/systemd/systemd-modules-load`, and confirming `/dev/ps5-fan`
   returned.
 - Built `dkms/ps5-icc-fan/ps5_fanctl` and updated root `make install` to copy it
-  under `/usr/local/lib/ps5-linux-cpuclock/dkms/ps5-icc-fan/` when available, so
+  under `/usr/local/lib/ps5-linux-power/dkms/ps5-icc-fan/` when available, so
   installed `ps5gov-trace.sh` can capture EMC zones.
 - Root service smoke test passed after install:
-  `sudo -n /usr/local/lib/ps5-linux-cpuclock/governors/ps5gov-smoke.sh --service`.
+  `sudo -n /usr/local/lib/ps5-linux-power/governors/ps5gov-smoke.sh --service`.
   That restore test stops `ps5gov`, so the service was started again afterward.
-- Do not stage generated binaries, external Cyan checkouts, or target-built
+- Do not stage generated binaries, external reference checkouts, or target-built
   helper binaries unless deliberately adopting them.
 
 PS5 target:
 
 - SSH: `steam@10.0.1.41`.
-- Test tree: `/home/steam/ps5-linux-cpuclock-test`.
-- Installed service uses `/usr/local/lib/ps5-linux-cpuclock` and
+- Test tree: `/home/steam/ps5-linux-power-test`.
+- Installed service uses `/usr/local/lib/ps5-linux-power` and
   `/etc/systemd/system/ps5gov.service`.
 - `ps5gov.service` is installed, enabled, and active after reboot.
 - `ps5boost.service` and `ps5fan.service` are inactive; `ps5gov.service`
@@ -120,7 +120,8 @@ Validated on target:
   `shadow-trial-manual-benchmark`, active method `fdinfo`, average load 0.972,
   max load 1.000, max hwmon temp 84 C, max EMC zones
   81.00/83.25/29.38/71.98 C, current/target/desired MHz reached 2230, boost
-  active, thermal cap level 3 appeared for 746 samples, fan pattern 1. Trace:
+  active, the previous staged thermal policy capped the GPU for 746 samples, and
+  fan pattern 1 was active. Trace:
   `/tmp/ps5gov-traces/ps5gov-trace-1781268618.csv`.
 
 Important caveats:
@@ -137,10 +138,11 @@ Important caveats:
 Next best work:
 
 - Review real-game trace data against subjective fan noise. Shadow Trial reached
-  84 C hwmon / 83.25 C EMC zone and thermal cap level 3 for 746 samples with fan
-  pattern 1; if noise was acceptable but temperature is considered too warm,
-  test the staged fan curve or a lower target temperature. If noise was too loud,
-  keep current defaults and accept thermal cap behavior.
+  84 C hwmon / 83.25 C EMC zone with fan pattern 1. Manual fan target testing
+  found MAINSOC target `70 C` acceptable and able to hold roughly `70-72 C`
+  without GPU thermal cap under that load, while `58 C` was too loud. Adopted a
+  provisional measured-data curve:
+  `45:78:0,60:74:0,72:70:1,82:68:1,88:66:1`.
 - Capture additional 15-30 minute root traces for heavier real games as needed:
   `sudo ps5gov-trace.sh -d 1800 -i 1 -n game-or-scene-name`.
 - Best commercial target for repeatable heavier tuning is Shadow of the Tomb
@@ -168,7 +170,7 @@ Next best work:
 - [x] One-shot tools for CPU P-state, DF P-state, GPU GFXCLK, and MP1 boost.
 - [x] CPU/GPU load-adaptive governors.
 - [x] systemd service and install target.
-- [x] `/etc/ps5-linux-cpuclock/ps5gov.conf` config file.
+- [x] `/etc/ps5-linux-power/ps5gov.conf` config file.
 - [x] `auto`, `quiet`, `balanced`, and `performance` profiles, with
       `performance` as the default gaming profile.
 - [x] `ps5govctl` for profile switching, config inspection, sensors, restore,
@@ -177,7 +179,7 @@ Next best work:
 - [x] Parent-level restore on governor shutdown: boost off, CPU P0, GPU 2000.
 - [x] Local UAPI fallback headers for stripped/custom PS5 Linux images.
 
-## Cyan-derived parts already used
+## External-reference-derived parts already used
 
 - [x] Same userspace SMN mailbox transport through PCI config space
       `0000:00:00.0` index/data registers.
@@ -188,12 +190,12 @@ Next best work:
       normal ramp, and burst ramp thresholds.
 - [x] GPU governor presets (`auto`, `quiet`, `balanced`, `performance`) so the
       service can use concise profile selection while preserving manual tuning.
-- [x] GPU frequency range limits, matching Cyan's configurable min/max policy
+- [x] GPU frequency range limits, matching the configurable min/max policy
       concept while keeping PS5-safe defaults.
-- [x] Runtime high-performance override inspired by Cyan's D-Bus performance
-      mode, implemented as a dependency-free `/run/ps5-power.performance` switch
-      controlled by `ps5govctl performance on|off|status`.
-- [x] Deferred Cyan's direct D-Bus service and voltage/safe-point table for now:
+- [x] Runtime high-performance override, implemented as a dependency-free
+      `/run/ps5-power.performance` switch controlled by
+      `ps5govctl performance on|off|status`.
+- [x] Deferred direct D-Bus service and voltage/safe-point table for now:
       D-Bus adds packaging/dependency surface, and voltage points are not PS5
       validated.
 
@@ -207,8 +209,9 @@ Next best work:
       temperature source.
 - [x] Refuse governor startup when `/dev/mp1` or the SMN PCI config path is
       missing.
-- [x] Use staged GPU thermal caps:
-      warm disables boost, hot caps to 1500 MHz, critical caps to 1200 MHz.
+- [x] Use gradual GPU thermal max-frequency reduction:
+      above `85 C` clear boost, start around 2000 MHz, and step down while hot;
+      below `75 C` restore the requested max and normal boost behavior.
 - [x] Implement optional in-repo fan governor (`ps5_fan_gov`) with fan state
       exposure (`/run/ps5-power.fan`) and configurable temperature hysteresis.
 - [x] Fan governor auto sensor mode tracks the hottest hwmon temperature, restores
@@ -275,17 +278,15 @@ Implemented direction:
 
 ## Fan curve design
 
-Goal: keep the default fan policy enabled and gaming-oriented, while allowing
-opt-in staged temperature curves for target-side tuning. The default service
-starts `ps5_fan_gov`, keeps the default servo pattern below 55 C, switches to the
-cool pattern at 55 C, and restores the default pattern below 45 C. Curve stages
-drive EMC target temperature when `/dev/ps5-fan` is available and fall back to
-servo-pattern selection when only legacy `/dev/icc` is available.
+Goal: keep the default fan policy enabled and gaming-oriented with a
+measured-data staged curve. The default service starts `ps5_fan_gov`; curve
+stages drive EMC target temperature when `/dev/ps5-fan` is available and fall
+back to servo-pattern selection when only legacy `/dev/icc` is available.
 
 Implemented config shape:
 
 ```sh
-FAN_CURVE="45:62:0,50:58:0,58:55:1,65:52:1,72:48:1"
+FAN_CURVE="45:78:0,60:74:0,72:70:1,82:68:1,88:66:1"
 FAN_HYSTERESIS=4
 ```
 
@@ -295,23 +296,26 @@ Each point is:
 temp_up_c:target_temp_c:servo_pattern
 ```
 
-Provisional staged curve:
+Default provisional staged curve:
 
 | Stage | Up C | Down C | Servo pattern | EMC target C |
 | --- | ---: | ---: | ---: | ---: |
-| 0 | default | default | 0 | 62 |
-| 1 | 50 | 46 | 0 | 58 |
-| 2 | 58 | 54 | 1 | 55 |
-| 3 | 65 | 61 | 1 | 52 |
-| 4 | 72 | 68 | 1 | 48 |
+| 0 | 45 | default | 0 | 78 |
+| 1 | 60 | 56 | 0 | 74 |
+| 2 | 72 | 68 | 1 | 70 |
+| 3 | 82 | 78 | 1 | 68 |
+| 4 | 88 | 84 | 1 | 66 |
 
-Those numbers are provisional starting points, not measured PS5 fan truth. They
-come from conservative policy assumptions and existing repo defaults:
+Those numbers are provisional but based on measured PS5 behavior:
 
-- Existing `ps5_fan_gov` default hysteresis is `-H 58 -L 48`.
-- Existing GPU thermal policy starts reacting around `75..85C`.
-- The draft keeps normal control below the GPU throttle range and uses 4C
-  hysteresis to avoid oscillation.
+- Shadow Trial reached 84 C hwmon / 83.25 C EMC zone with the default cool
+  pattern.
+- MAINSOC target-temp `70 C` held roughly `70-72 C` under Shadow load with GPU
+  boost active and no thermal cap.
+- MAINSOC target-temp `58 C` was too loud.
+- The curve keeps quiet/default behavior at low temperatures, uses 70 C as the
+  main gaming-load target, and only asks for stronger cooling above the measured
+  Shadow Trial range.
 
 Validation required before making this default:
 
@@ -323,9 +327,8 @@ Validation required before making this default:
   EMC zones up to 83.25 C during sustained load.
 - Confirm which servo pattern numbers map to default/cool/max behavior.
 - Confirm target-temp writes affect EMC auto-servo behavior predictably.
-- Adjust curve points from measured temperature/noise/performance data. Measured
-  temperature/performance data exists; subjective fan-noise feedback is still
-  needed before deciding whether to make the curve more aggressive.
+- Adjust curve points from new user bundles and local traces if broader games
+  show worse temperatures, performance loss, or unacceptable fan noise.
 
 ## Real PS5 validation checklist
 
@@ -343,10 +346,10 @@ Validation required before making this default:
 - [x] Under a GPU-visible game/benchmark session, GPU ramps up and boost state
       becomes non-zero. `vkmark --winsys wayland` on the target produced
       fdinfo-visible load, reached 2230 MHz, and set GPU boost non-zero.
-- [x] At high temperature, boost is cleared and GPU cap falls in stages.
-      Shadow Trial naturally reached thermal cap level 3 for 746 samples during
-      a 30-minute trace; samples show boost off and target/current capped to
-      2000 MHz when thermal cap is active.
+- [x] At high temperature, boost is cleared and GPU max frequency is reduced.
+      Shadow Trial naturally reached the previous thermal cap during a
+      30-minute trace; current policy now uses gradual max-frequency reduction
+      instead of fixed staged cap levels.
 - [x] `sudo ps5govctl restore` stops the service and restores CPU P0/GPU 2000;
       verified boost `0x0`, CPU P0 request, GPU reset to 2000, fan pattern 0,
       then restarted `ps5gov.service`.
@@ -419,30 +422,47 @@ Validation required before making this default:
       benchmark trace on real PS5 hardware.
 - [x] Validate GPU moving-target defaults against a real game trace on real PS5
       hardware.
-- [ ] Validate provisional fan curve points and adjust from measured trace data;
-      do not promote the curve to default until this is done.
+- [x] Promote a provisional fan curve based on existing measured data:
+      `45:78:0,60:74:0,72:70:1,82:68:1,88:66:1`.
+- [ ] Validate the provisional fan curve across broader games and user trace
+      bundles; adjust if temperatures, performance, or noise regress.
 
 ## Next implementation work
 
 - [x] Decide whether GPU busy sampling should stay fdinfo-based or move to a
-      safer kernel/libdrm path for Cyan-style busy sampling. Current decision:
+      safer kernel/libdrm path for hardware busy sampling. Current decision:
       keep fdinfo plus debugfs fallback in userspace for now; do not add
       userspace MMIO busy sampling until real game/benchmark traces show both
       fdinfo and debugfs are inadequate.
-- [ ] If this becomes more than a PoC, move all SMN mailbox transactions behind a
-      kernel `/dev/mp1` ioctl or another kernel-locked interface.
-      Preferred direction: a DKMS module that owns the SMN mailbox transport and
-      exposes curated ioctls through a character device such as `/dev/ps5-smu`,
-      `/dev/ps5-smn`, or an extended `/dev/mp1`.
-      Keep governor policy in userspace; move only mailbox transport,
-      serialization, and hardware ownership into the kernel.
-      Do not expose raw arbitrary SMN read/write or arbitrary mailbox messages by
-      default. Safe initial ioctls should cover only the validated operations:
-      CPU P-state request/query, GPU GFXCLK request, voltage reads, and possibly
-      MP1 boost ownership if consolidating `/dev/mp1`.
-      The main benefit is removing the userspace PCI config-space race around
-      the `0xB8/0xBC` SMN index/data pair and coordinating with in-kernel SMN
-      users through a kernel-owned lock/helper path.
+- [x] Add shared-thermal CPU cooperation to `ps5_cpu_gov`.
+      Rationale: CPU and GPU share the same SoC thermal envelope, fan path, and
+      boost/power headroom. GPU-only thermal limiting is incomplete when the CPU
+      remains at P0/3200 during sustained game load.
+      Implemented conservative first policy:
+      - below `75 C`: normal CPU load policy and boost can follow top-tier load.
+      - `>= 85 C`: cap CPU max to P1/2560 MHz and suppress CPU boost.
+      - `>= 90 C`: cap CPU max to P2/2327 MHz and suppress CPU boost.
+      - below `75 C`: restore normal CPU max policy.
+      Use the same temperature source style as GPU (`auto`, GPU hwmon, or
+      `k10temp`) so CPU and GPU governors react to shared package/SoC
+      temperature. CPU state now exposes raw demand, effective demand,
+      temperature, thermal cap, and max allowed P-state.
+- [ ] Validate shared-thermal CPU cooperation under Shadow Trial or a similar
+      sustained game load. Compare CPU P-state, GPU thermal-cap samples, max
+      hwmon/EMC temperature, average GPU load, and subjective performance/fan
+      noise.
+- [x] Add first-phase kernel-owned SMN mailbox transport as optional DKMS:
+      `dkms/ps5-smu` creates `/dev/ps5-smu` and exposes curated ioctls for CPU
+      P-state get/set, GPU GFXCLK get/set, and CPU/GPU rail voltage reads.
+      Existing tools prefer `/dev/ps5-smu` when present and fall back to direct
+      userspace PCI config-space SMN access otherwise.
+- [x] Install `ps5-smu` through DKMS on the target, enable module autoload, and
+      validate service operation through `/dev/ps5-smu`.
+      Verified by unloading `ps5_smu`, running
+      `/usr/lib/systemd/systemd-modules-load`, confirming `/dev/ps5-smu`
+      returned, then restarting `ps5gov.service` and validating sensors.
+- [ ] Extend or replace `/dev/mp1` boost ownership if consolidating boost into
+      the same kernel-owned interface becomes necessary.
 
 ## Deferred by design
 

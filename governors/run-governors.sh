@@ -22,7 +22,7 @@ CPU_CTL="$ROOT/ps5_cpu"
 GPU_CTL="$ROOT/ps5_gpu"
 BOOST_CTL="$ROOT/ps5_boost"
 SMN_CFG="/sys/bus/pci/devices/0000:00:00.0/config"
-PS5GOV_CONFIG="${PS5GOV_CONFIG:-/etc/ps5-linux-cpuclock/ps5gov.conf}"
+PS5GOV_CONFIG="${PS5GOV_CONFIG:-/etc/ps5-linux-power/ps5gov.conf}"
 PERFORMANCE_STATE="${PS5GOV_PERFORMANCE_STATE:-/run/ps5-power.performance}"
 PRINT_CONFIG=0
 

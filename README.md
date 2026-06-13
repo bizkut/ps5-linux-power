@@ -1,4 +1,4 @@
-# ps5-linux-cpuclock
+# ps5-linux-power
 
 PS5 Linux power tools for gaming-focused CPU, GPU, boost, and fan control.
 
@@ -19,6 +19,10 @@ this project is tuned first for gaming.
 
 Use the governor service for normal use. The manual tools are mostly for testing,
 tuning, and recovery.
+
+The optional `dkms/ps5-smu` module provides a kernel-owned `/dev/ps5-smu`
+transport for the validated CPU/GPU/voltage mailbox commands. When loaded, the
+tools prefer it over direct userspace PCI config-space access.
 
 ## Quick Install
 
@@ -95,7 +99,7 @@ ps5govctl performance status
 ```
 
 `performance on` forces the performance profile until you turn it off. It does
-not rewrite the saved profile in `/etc/ps5-linux-cpuclock/ps5gov.conf`.
+not rewrite the saved profile in `/etc/ps5-linux-power/ps5gov.conf`.
 
 ## Common Operations
 
@@ -140,7 +144,7 @@ to:
 Optional staged curves are supported:
 
 ```sh
-FAN_CURVE="45:62:0,50:58:0,58:55:1,65:52:1,72:48:1"
+FAN_CURVE="45:78:0,60:74:0,72:70:1,82:68:1,88:66:1"
 FAN_HYSTERESIS=4
 ```
 
@@ -154,25 +158,35 @@ The richer `/dev/ps5-fan` interface is provided by the optional DKMS module in
 `dkms/ps5-icc-fan`. Without that module, the fan governor falls back to the older
 `/dev/icc` interface.
 
+The default curve is provisional but based on measured PS5 data: Shadow Trial
+reached 84 C with the default cool pattern, target-temp `70 C` held roughly
+`70-72 C` under that load, and `58 C` was too loud.
+
 The EMC fan behavior is based on the public PS5 EMC reverse engineering work at
 <https://github.com/c0w-ar/ps5-emc-re>.
 
 ## GPU Thermal Behavior
 
-In the default `performance` GPU profile, thermal protection starts before hard
-throttle temperatures:
+In the default `performance` GPU profile, thermal protection uses a gradual
+max-frequency reduction:
 
 | Temperature | Governor behavior |
 | --- | --- |
-| `>= 80 C` | warm cap, clears boost and limits the normal path to about `2000 MHz` |
-| `>= 90 C` | hot cap, limits GPU target to `1500 MHz` |
-| `>= 95 C` | critical cap, limits GPU target to `1200 MHz` |
-| `< 80 C` | recovers to normal boost behavior |
+| `> 85 C` | clears boost, starts from about `2000 MHz`, then gradually lowers the allowed max frequency |
+| `< 75 C` | restores the requested max and normal boost behavior |
 
 On this PS5, Shadow of the Tomb Raider Trial reached the warm cap during a
 30-minute benchmark trace. Manual fan target testing found `70 C` to be a good
 quiet target under that load: it held roughly `70-72 C` with GPU boost active
 and no thermal cap, while `58 C` was too loud.
+
+## CPU Thermal Behavior
+
+CPU and GPU share the same SoC thermal envelope, so the CPU governor also watches
+APU temperature. By default it keeps normal load-based CPU policy below `75 C`,
+caps the fastest CPU state to P1/2560 at `85 C`, caps to P2/2327 at `90 C`, and
+restores normal policy below `75 C`. CPU boost is disabled while a thermal cap is
+active.
 
 ## Manual Clock Tools
 
@@ -206,61 +220,16 @@ Start it again when done:
 sudo systemctl start ps5gov
 ```
 
-## Validation
-
-Run the local smoke checks:
-
-```sh
-governors/ps5gov-smoke.sh
-```
-
-Run the service lifecycle check on the PS5:
-
-```sh
-sudo governors/ps5gov-smoke.sh --service
-```
-
-Collect a tuning trace:
-
-```sh
-sudo governors/ps5gov-trace.sh -d 300 -i 1
-sudo governors/ps5gov-trace.sh -d 1800 -i 1 -n "game scene"
-```
-
-Validate fan behavior:
-
-```sh
-governors/ps5gov-fan-validate.sh
-sudo governors/ps5gov-fan-validate.sh --write-tests
-```
-
-If you build the optional DKMS fan probe first, `make install-systemd` also
-installs `ps5_fanctl` under the runtime library tree so installed traces can
-include EMC zone temperatures:
-
-```sh
-make -C dkms/ps5-icc-fan userspace
-sudo make install-systemd
-```
-
-## Troubleshooting
-
-| Problem | What to do |
-| --- | --- |
-| `need root` | Run the command with `sudo` |
-| Values do not change | Stop other policy services, then retry |
-| Mailbox busy or stuck | Stop competing tools; reboot if the mailbox is wedged |
-| Fan policy conflicts | Disable older `ps5fan.service` and let `ps5gov` own fan policy |
-| GPU does not ramp in a test | Use a real game/benchmark with fdinfo-visible GPU load |
-
 ## More Docs
 
-- [USAGE.md](USAGE.md) has command examples.
-- [TECHNICAL.md](TECHNICAL.md) has the safety model, implementation details, and
-  lower-level tuning notes.
+- [docs/USAGE.md](docs/USAGE.md) has command examples.
+- [docs/TECHNICAL.md](docs/TECHNICAL.md) has the safety model, implementation details, and
+  validation notes.
 - [governors/README.md](governors/README.md) documents governor-specific flags.
 - [dkms/ps5-icc-fan/README.md](dkms/ps5-icc-fan/README.md) documents the optional
   DKMS fan module.
+- [dkms/ps5-smu/README.md](dkms/ps5-smu/README.md) documents the optional DKMS
+  SMU mailbox module.
 
 ## Status
 

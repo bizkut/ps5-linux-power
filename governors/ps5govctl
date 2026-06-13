@@ -1,10 +1,10 @@
 #!/bin/sh
 set -u
 
-CONFIG="${PS5GOV_CONFIG:-/etc/ps5-linux-cpuclock/ps5gov.conf}"
+CONFIG="${PS5GOV_CONFIG:-/etc/ps5-linux-power/ps5gov.conf}"
 SERVICE="${PS5GOV_SERVICE:-ps5gov.service}"
-RUNNER="${PS5GOV_RUNNER:-/usr/local/lib/ps5-linux-cpuclock/governors/run-governors.sh}"
-TOOLS_DIR="${PS5GOV_TOOLS_DIR:-/usr/local/lib/ps5-linux-cpuclock}"
+RUNNER="${PS5GOV_RUNNER:-/usr/local/lib/ps5-linux-power/governors/run-governors.sh}"
+TOOLS_DIR="${PS5GOV_TOOLS_DIR:-/usr/local/lib/ps5-linux-power}"
 CPU_CTL="$TOOLS_DIR/ps5_cpu"
 GPU_CTL="$TOOLS_DIR/ps5_gpu"
 BOOST_CTL="$TOOLS_DIR/ps5_boost"
