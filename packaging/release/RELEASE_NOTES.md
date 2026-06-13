@@ -1,24 +1,30 @@
-# ps5-linux-power release
+# ps5-linux-power 0.1.0
 
-## Install
+## What is included
+
+This release provides PS5 Linux userspace power tools, the `ps5gov` systemd
+governor service, fan and thermal policy, trace helpers, and optional kernel
+transports for `/dev/ps5-smu` and `/dev/ps5-fan`.
+
+## Installation
 
 Download the packages for your distro family from this release. Install the
 userspace package plus the matching kernel-transport package with the distro
 package manager so dependencies are resolved automatically.
 
-Debian/Ubuntu:
+### Debian/Ubuntu
 
 ```sh
 sudo apt install ./ps5-linux-power_*.deb ./ps5-linux-power-dkms_*.deb
 ```
 
-Fedora:
+### Fedora
 
 ```sh
 sudo dnf install ./ps5-linux-power-*.rpm ./ps5-linux-power-dkms-*.rpm
 ```
 
-Bazzite/Fedora Atomic:
+### Bazzite/Fedora Atomic
 
 ```sh
 sudo rpm-ostree install \
@@ -35,7 +41,7 @@ sudo systemctl enable --now ps5gov
 ps5govctl sensors
 ```
 
-Arch:
+### Arch
 
 ```sh
 sudo pacman -U ps5-linux-power-*.pkg.tar.zst ps5-linux-power-dkms-*.pkg.tar.zst
@@ -67,6 +73,6 @@ PS5 custom kernel, then reinstall `ps5-linux-power-dkms` or
 - `ps5-linux-power`: userspace tools, governors, systemd service, config, and
   documentation.
 - `ps5-linux-power-dkms`: optional `/dev/ps5-smu` and `/dev/ps5-fan` kernel
-  transports built through DKMS.
+  transports built through DKMS. Use this on Debian/Ubuntu, Fedora, and Arch.
 - `akmod-ps5-linux-power`: Fedora/Bazzite-native alternative to the DKMS
   package. Prefer this on Bazzite and Fedora Atomic systems.
