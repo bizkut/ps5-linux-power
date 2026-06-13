@@ -1,8 +1,8 @@
 # PS5 governor hardening plan
 
-This repo is now a userspace power-control PoC with systemd integration. The
-remaining plan is mostly about validation and deciding whether the mailbox path
-should stay in userspace or move behind a kernel-owned interface.
+This repo is now `ps5-linux-power`: a userspace PS5 power-control stack with
+systemd integration, fan/thermal policy, trace collection, and optional DKMS
+kernel transports. The remaining plan is validation-first.
 
 ## New agent handoff
 
@@ -11,16 +11,19 @@ Start here if taking over this thread.
 Current local repo state:
 
 - Branch: `main`.
-- Latest commit: `d9c3955 governors: default to gaming performance policy`.
-- Working tree has source/doc changes for the `ps5-linux-power` rename,
-  `docs/` layout, fan curve tuning, CPU thermal cooperation, and the optional
-  `dkms/ps5-smu` transport.
+- GitHub: `https://github.com/bizkut/ps5-linux-power`.
+- Latest pushed commits:
+  - `e00bbbf docs: rename project to ps5-linux-power`
+  - `be4ac23 dkms: add curated PS5 SMU transport`
+  - `0676947 governors: add shared thermal policy and trace bundles`
+- Working tree should only have generated binaries after a build. Do not stage
+  generated binaries unless deliberately adopting them.
 - `ps5_gpu_gov` also clamps computed load to `0.0..1.0`; sustained `vkmark`
   showed summed fdinfo counters can report above 100% when multiple DRM fdinfo
   entries overlap.
-- Local validation after those changes:
-  `sh -n governors/ps5gov-trace.sh`, `make`, `governors/ps5gov-smoke.sh`, then
-  `make clean`.
+- Local validation after the current changes: `make`,
+  `governors/ps5gov-smoke.sh`, `sudo -n make install-systemd`,
+  `sudo -n systemctl restart ps5gov.service`, and `ps5govctl sensors`.
 - This checkout is on the PS5 target itself; target deployment can be done
   locally with `make` and `sudo make install-systemd`.
 - Installed locally on the PS5 target with `sudo -n make install-systemd`.
@@ -30,6 +33,9 @@ Current local repo state:
   `mesa-utils`, `vulkan-tools`, and `vkmark`.
 - Installed `ps5-icc-fan` through DKMS on the target and loaded
   `ps5_icc_fan`; `/dev/ps5-fan` exists after `modprobe`.
+- Installed `ps5-smu` through DKMS on the target and loaded `ps5_smu`;
+  `/dev/ps5-smu` exists and the tools prefer it over direct userspace PCI
+  config-space SMN access.
 - Added `/etc/modules-load.d/ps5-icc-fan.conf` so `ps5_icc_fan` loads after
   reboot. Verified by unloading the module, running
   `/usr/lib/systemd/systemd-modules-load`, and confirming `/dev/ps5-fan`
@@ -40,15 +46,20 @@ Current local repo state:
 - Root service smoke test passed after install:
   `sudo -n /usr/local/lib/ps5-linux-power/governors/ps5gov-smoke.sh --service`.
   That restore test stops `ps5gov`, so the service was started again afterward.
-- Do not stage generated binaries, external reference checkouts, or target-built
-  helper binaries unless deliberately adopting them.
+- Generated binaries currently expected after local builds include root tool
+  binaries, governor binaries, `dkms/ps5-icc-fan/ps5_fanctl`, and
+  `dkms/ps5-smu/ps5_smuctl`.
 
 PS5 target:
 
 - SSH: `steam@10.0.1.41`.
 - Test tree: `/home/steam/ps5-linux-power-test`.
 - Installed service uses `/usr/local/lib/ps5-linux-power` and
-  `/etc/systemd/system/ps5gov.service`.
+  `/etc/ps5-linux-power/ps5gov.conf`.
+- The Makefile intentionally migrates an old
+  `/etc/ps5-linux-cpuclock/ps5gov.conf` into the new config path on first
+  install.
+- systemd service path: `/etc/systemd/system/ps5gov.service`.
 - `ps5gov.service` is installed, enabled, and active after reboot.
 - `ps5boost.service` and `ps5fan.service` are inactive; `ps5gov.service`
   conflicts with both.
@@ -59,6 +70,7 @@ PS5 target:
   - `FAN_ENABLED=1`
   - `FAN_ARGS="-i 3000 -H 55 -L 45 -s auto"`
 - `ps5_icc_fan` has been built/loaded successfully and `/dev/ps5-fan` works.
+- `ps5_smu` has been built/loaded successfully and `/dev/ps5-smu` works.
 
 Validated on target:
 
@@ -143,17 +155,18 @@ Next best work:
   without GPU thermal cap under that load, while `58 C` was too loud. Adopted a
   provisional measured-data curve:
   `45:78:0,60:74:0,72:70:1,82:68:1,88:66:1`.
-- Capture additional 15-30 minute root traces for heavier real games as needed:
-  `sudo ps5gov-trace.sh -d 1800 -i 1 -n game-or-scene-name`.
+- Capture additional 15-30 minute root traces for heavier real games as needed.
+  Prefer the persistent bundle wrapper:
+  `sudo ps5gov-collect-trace.sh -d 1800 -i 1 -n game-or-scene-name`.
 - Best commercial target for repeatable heavier tuning is Shadow of the Tomb
   Raider: Definitive Edition, because it is a native Linux/Feral Vulkan game
-  with a command-line benchmark path. Suggested trace:
-  `sudo ps5gov-trace.sh -d 1800 -i 1 -n shadow-tomb-raider-benchmark`, then run
-  `steam -applaunch 750920 -benchmark`.
+  with a command-line benchmark path. Suggested trace bundle:
+  `sudo ps5gov-collect-trace.sh -d 1800 -i 1 -n shadow-tomb-raider-benchmark`,
+  then run `steam -applaunch 750920 -benchmark`.
 - Current installed commercial target is Shadow of the Tomb Raider Trial
   (`974630`) through Proton. It has a launcher, so the validated workflow is:
-  start the benchmark manually, then attach a trace with
-  `sudo ps5gov-trace.sh -d 1800 -i 1 -n shadow-trial-manual-benchmark`.
+  start the benchmark manually, then attach a trace bundle with
+  `sudo ps5gov-collect-trace.sh -d 1800 -i 1 -n shadow-trial-smu-fan-cpu-validation`.
 - Other commercial fallback candidates: Deus Ex: Mankind Divided, DiRT Rally,
   and Mad Max, all with reported benchmark/automation paths. Avoid making Total
   War the first choice because its benchmark is less command-line friendly.
@@ -164,6 +177,8 @@ Next best work:
   `drm-engine-gfx` counter, and a note column so real-game runs can distinguish
   "governor did not ramp" from "current sampler saw no GPU work" and tie fan
   noise observations to a specific game/scene.
+- Next code work should wait until a new real-game bundle plus subjective fan
+  noise feedback shows a specific regression or tuning need.
 
 ## Current state
 
