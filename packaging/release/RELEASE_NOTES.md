@@ -1,4 +1,10 @@
-# ps5-linux-power 0.1.0
+# ps5-linux-power 0.1.1
+
+## What changed
+
+- Added a `powersave` profile for lower idle power experiments.
+- `powersave` uses conservative CPU ramp thresholds and a GPU range of
+  `400..1500 MHz`.
 
 ## What is included
 
