@@ -85,6 +85,7 @@ Change profile without editing config by hand:
 sudo ps5govctl profile performance
 sudo ps5govctl profile balanced
 sudo ps5govctl profile quiet
+sudo ps5govctl profile powersave
 sudo ps5govctl profile auto
 ```
 
@@ -93,6 +94,7 @@ sudo ps5govctl profile auto
 | `performance` | Gaming default; fastest response and highest performance bias |
 | `balanced` | Daily use with lower idle power/heat |
 | `quiet` | Lower noise and slower ramp-up |
+| `powersave` | Lowest idle bias; GPU can drop to `400 MHz` and boost response is conservative |
 | `auto` | Reserved adaptive mode; currently maps to the balanced policy |
 
 Temporary performance override:

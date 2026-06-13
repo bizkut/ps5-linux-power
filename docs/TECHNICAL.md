@@ -165,6 +165,7 @@ Built-in profiles:
 | Profile | CPU policy | GPU policy |
 | --- | --- | --- |
 | `auto` | reserved adaptive profile, currently balanced policy | `-P auto` |
+| `powersave` | slower sampling, high load thresholds | `-P quiet -n 400 -x 1500` |
 | `quiet` | slower sampling, higher load thresholds | `-P quiet` |
 | `balanced` | lower-power daily profile | `-P balanced` |
 | `performance` | default gaming profile, faster sampling, lower load thresholds | `-P performance` |

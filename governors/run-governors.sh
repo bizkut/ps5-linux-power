@@ -119,6 +119,10 @@ apply_profile() {
 		: "${CPU_ARGS:=-i 400 -d 4 -H 40 -M 20 -L 8}"
 		: "${GPU_ARGS:=-P auto}"
 		;;
+	powersave)
+		: "${CPU_ARGS:=-i 800 -d 8 -H 65 -M 35 -L 12}"
+		: "${GPU_ARGS:=-P quiet -n 400 -x 1500}"
+		;;
 	quiet)
 		: "${CPU_ARGS:=-i 600 -d 6 -H 55 -M 30 -L 12}"
 		: "${GPU_ARGS:=-P quiet}"
@@ -132,7 +136,7 @@ apply_profile() {
 		: "${GPU_ARGS:=-P performance}"
 		;;
 	*)
-		die "invalid PROFILE=$PROFILE (use auto, quiet, balanced, or performance)"
+		die "invalid PROFILE=$PROFILE (use auto, powersave, quiet, balanced, or performance)"
 		;;
 	esac
 }

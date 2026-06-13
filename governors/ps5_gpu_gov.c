@@ -440,20 +440,20 @@ static uint32_t interp_mhz(double load, double lo_load, double hi_load, uint32_t
 	return round10((uint32_t)(lo_mhz + (hi_mhz - lo_mhz) * pos));
 }
 
-static uint32_t desired_mhz_for_load(double load, uint32_t max_mhz)
+static uint32_t desired_mhz_for_load(double load, uint32_t min_mhz, uint32_t max_mhz)
 {
 	uint32_t desired;
 
 	if (load < up_low)
-		desired = G_IDLE;
+		desired = min_mhz;
 	else if (load < up_mid)
-		desired = interp_mhz(load, up_low, up_mid, G_LOW, G_MID);
+		desired = interp_mhz(load, up_low, up_mid, min_mhz, G_MID);
 	else if (load < up_high)
 		desired = interp_mhz(load, up_mid, up_high, G_MID, G_MAX);
 	else
 		desired = max_mhz;
 
-	return clamp_mhz(desired, G_IDLE, max_mhz);
+	return clamp_mhz(desired, min_mhz, max_mhz);
 }
 
 static unsigned int mhz_diff(uint32_t a, uint32_t b)
@@ -611,7 +611,7 @@ int main(int argc, char **argv)
 		uint32_t cap_mhz = thermal_cap ? thermal_max_mhz : requested_max;
 		uint32_t min_mhz = thermal_cap && cap_mhz < range_min_mhz ? cap_mhz : range_min_mhz;
 		uint32_t max_mhz = clamp_mhz(cap_mhz, min_mhz, requested_max);
-		uint32_t desired_mhz = desired_mhz_for_load(load, max_mhz);
+		uint32_t desired_mhz = desired_mhz_for_load(load, min_mhz, max_mhz);
 		uint32_t step = burst ? (uint32_t)burst_step_mhz : (uint32_t)step_mhz;
 		desired_mhz = clamp_mhz(desired_mhz, min_mhz, max_mhz);
 
@@ -635,7 +635,9 @@ int main(int argc, char **argv)
 		target_mhz = clamp_mhz(target_mhz, min_mhz, max_mhz);
 
 		boost_changed = 0;
-		int need_boost = !thermal_cap && (high_load || burst || target_mhz > G_MAX);
+		int boost_capable = range_max_mhz > G_MAX;
+		int need_boost = !thermal_cap && boost_capable &&
+			(high_load || burst || target_mhz > G_MAX);
 		if (need_boost && !boost_on) {
 			if (smn_boost_vote(SMN_BOOST_GPU, 1) == 0) {
 				boost_on = 1;

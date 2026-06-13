@@ -113,6 +113,7 @@ sudo systemctl enable --now ps5gov
 Profiles:
 ```sh
 sudo ps5govctl profile quiet
+sudo ps5govctl profile powersave
 sudo ps5govctl profile balanced
 sudo ps5govctl profile performance
 sudo ps5govctl profile auto

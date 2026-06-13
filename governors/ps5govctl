@@ -17,7 +17,7 @@ GPU_STATE="/run/ps5-power.gpu"
 FAN_SERVICE="ps5fan.service"
 
 usage() {
-	echo "usage: ps5govctl profile <auto|quiet|balanced|performance>|performance <on|off|status>|config|sensors|status|reload|restart|restore|stop-boost" >&2
+	echo "usage: ps5govctl profile <auto|powersave|quiet|balanced|performance>|performance <on|off|status>|config|sensors|status|reload|restart|restore|stop-boost" >&2
 	exit 2
 }
 
@@ -35,7 +35,7 @@ reload_or_restart() {
 write_profile() {
 	profile="$1"
 	case "$profile" in
-	auto|quiet|balanced|performance) ;;
+	auto|powersave|quiet|balanced|performance) ;;
 	*) usage ;;
 	esac
 
