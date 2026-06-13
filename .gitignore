@@ -1,0 +1,10 @@
+dist/
+ps5_boost
+ps5_cpu
+ps5_df
+ps5_gpu
+governors/ps5_cpu_gov
+governors/ps5_fan_gov
+governors/ps5_gpu_gov
+dkms/ps5-icc-fan/ps5_fanctl
+dkms/ps5-smu/ps5_smuctl

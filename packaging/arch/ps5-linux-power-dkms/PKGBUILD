@@ -1,0 +1,32 @@
+# Maintainer: PS5 Linux contributors
+pkgname=ps5-linux-power-dkms
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="DKMS kernel transports for ps5-linux-power"
+arch=('any')
+url="https://github.com/bizkut/ps5-linux-power"
+license=('GPL-2.0-only')
+depends=('dkms' 'gcc' 'make')
+source=("ps5-linux-power-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+	cd "$srcdir/ps5-linux-power-$pkgver"
+	install -d "$pkgdir/usr/src/ps5-smu-$pkgver"
+	install -m 0644 dkms/ps5-smu/Makefile dkms/ps5-smu/dkms.conf \
+		dkms/ps5-smu/ps5_smu.c dkms/ps5-smu/ps5_smu.h \
+		"$pkgdir/usr/src/ps5-smu-$pkgver/"
+	sed -i "s/PACKAGE_VERSION=\"0.1.0\"/PACKAGE_VERSION=\"$pkgver\"/" \
+		"$pkgdir/usr/src/ps5-smu-$pkgver/dkms.conf"
+
+	install -d "$pkgdir/usr/src/ps5-icc-fan-$pkgver"
+	install -m 0644 dkms/ps5-icc-fan/Makefile dkms/ps5-icc-fan/dkms.conf \
+		dkms/ps5-icc-fan/ps5_icc_fan.c dkms/ps5-icc-fan/ps5_icc_fan.h \
+		"$pkgdir/usr/src/ps5-icc-fan-$pkgver/"
+	sed -i "s/PACKAGE_VERSION=\"0.1.0\"/PACKAGE_VERSION=\"$pkgver\"/" \
+		"$pkgdir/usr/src/ps5-icc-fan-$pkgver/dkms.conf"
+
+	install -d "$pkgdir/etc/modules-load.d" "$pkgdir/usr/share/libalpm/scripts"
+	printf 'ps5_smu\n' > "$pkgdir/etc/modules-load.d/ps5-smu.conf"
+	printf 'ps5_icc_fan\n' > "$pkgdir/etc/modules-load.d/ps5-icc-fan.conf"
+}

@@ -18,6 +18,12 @@ Current local repo state:
   - `0676947 governors: add shared thermal policy and trace bundles`
 - Working tree should only have generated binaries after a build. Do not stage
   generated binaries unless deliberately adopting them.
+- Packaging is being added for Debian/Ubuntu, Fedora/RPM, and Arch releases.
+  The package split is `ps5-linux-power` for userspace and
+  `ps5-linux-power-dkms` for optional `/dev/ps5-smu` and `/dev/ps5-fan`
+  transports. DKMS packages depend on `dkms`, `gcc`, and `make`, but do not
+  depend on distro kernel headers because PS5 custom kernels should provide
+  matching headers at `/lib/modules/$(uname -r)/build`.
 - `ps5_gpu_gov` also clamps computed load to `0.0..1.0`; sustained `vkmark`
   showed summed fdinfo counters can report above 100% when multiple DRM fdinfo
   entries overlap.
@@ -193,6 +199,10 @@ Next best work:
 - [x] Shared boost-vote state so CPU and GPU governors do not fight each other.
 - [x] Parent-level restore on governor shutdown: boost off, CPU P0, GPU 2000.
 - [x] Local UAPI fallback headers for stripped/custom PS5 Linux images.
+- [x] Packaging scaffolding for Debian/Ubuntu `.deb`, Fedora/RPM `.rpm`, and
+      Arch `.pkg.tar.zst` artifacts.
+- [x] GitHub Actions release workflow that builds packages on `v*` tags and
+      publishes artifacts with release-note install commands.
 
 ## External-reference-derived parts already used
 

@@ -1,0 +1,25 @@
+# Maintainer: PS5 Linux contributors
+pkgname=ps5-linux-power
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="PS5 Linux userspace power, fan, and governor tools"
+arch=('x86_64')
+url="https://github.com/bizkut/ps5-linux-power"
+license=('GPL-2.0-only')
+depends=('systemd' 'glibc')
+makedepends=('gcc' 'make')
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+	cd "$srcdir/$pkgname-$pkgver"
+	make
+}
+
+package() {
+	cd "$srcdir/$pkgname-$pkgver"
+	make install-systemd DESTDIR="$pkgdir" PREFIX=/usr/local SYSCONFDIR=/etc
+	install -d "$pkgdir/usr/share/doc/$pkgname"
+	install -m 0644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+	cp -a docs "$pkgdir/usr/share/doc/$pkgname/"
+}

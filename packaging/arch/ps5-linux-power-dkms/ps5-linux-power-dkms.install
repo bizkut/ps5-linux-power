@@ -1,0 +1,28 @@
+_dkmsver() {
+	printf '%s\n' "${1%%-*}"
+}
+
+post_install() {
+	ver="$(_dkmsver "$1")"
+	kbuild="/lib/modules/$(uname -r)/build"
+	if [ ! -e "$kbuild" ]; then
+		echo "ps5-linux-power-dkms: missing $kbuild" >&2
+		echo "Install matching headers for the running PS5 custom kernel." >&2
+		return 1
+	fi
+	dkms add -m ps5-smu -v "$ver" || true
+	dkms build -m ps5-smu -v "$ver"
+	dkms install -m ps5-smu -v "$ver"
+	dkms add -m ps5-icc-fan -v "$ver" || true
+	dkms build -m ps5-icc-fan -v "$ver"
+	dkms install -m ps5-icc-fan -v "$ver"
+	depmod -a || true
+	modprobe ps5_smu || true
+	modprobe ps5_icc_fan || true
+}
+
+pre_remove() {
+	ver="$(_dkmsver "$1")"
+	dkms remove -m ps5-smu -v "$ver" --all || true
+	dkms remove -m ps5-icc-fan -v "$ver" --all || true
+}
