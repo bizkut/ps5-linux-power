@@ -48,6 +48,61 @@ ps5govctl config
 ps5govctl sensors
 ```
 
+## Uninstall
+
+First stop the governor and restore normal clocks:
+
+```sh
+sudo ps5govctl restore || true
+sudo systemctl disable --now ps5gov || true
+sudo systemctl daemon-reload
+```
+
+If you installed a release package, remove the package that matches your system:
+
+```sh
+# Debian / Ubuntu
+sudo apt remove ps5-linux-power ps5-linux-power-dkms
+
+# Fedora
+sudo dnf remove ps5-linux-power ps5-linux-power-dkms akmod-ps5-linux-power
+
+# Bazzite / rpm-ostree
+sudo rpm-ostree uninstall ps5-linux-power akmod-ps5-linux-power
+sudo systemctl reboot
+
+# Arch
+sudo pacman -R ps5-linux-power ps5-linux-power-dkms
+```
+
+If you installed manually with `sudo make install-systemd`, remove the installed
+files directly:
+
+```sh
+sudo systemctl disable --now ps5gov || true
+sudo rm -f /etc/systemd/system/ps5gov.service
+sudo rm -f /usr/local/bin/ps5govctl
+sudo rm -rf /usr/local/lib/ps5-linux-power
+sudo systemctl daemon-reload
+sudo systemctl reset-failed ps5gov || true
+```
+
+Optional DKMS/akmod cleanup:
+
+```sh
+sudo modprobe -r ps5_icc_fan ps5_smu 2>/dev/null || true
+sudo dkms remove -m ps5-smu --all 2>/dev/null || true
+sudo dkms remove -m ps5-icc-fan --all 2>/dev/null || true
+```
+
+The config is intentionally left behind so tuned profiles are not lost. Remove it
+only when you want a full purge:
+
+```sh
+sudo rm -rf /etc/ps5-linux-power
+sudo rm -rf /etc/ps5-linux-cpuclock   # old pre-rename config path, if present
+```
+
 ## Default Behavior
 
 The installed service defaults to:
