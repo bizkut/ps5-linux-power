@@ -2,8 +2,27 @@ _dkmsver() {
 	printf '%s\n' "${1%%-*}"
 }
 
+_dkms_remove() {
+	ver=$1
+	dkms remove -m ps5-smu -v "$ver" --all || true
+	dkms remove -m ps5-icc-fan -v "$ver" --all || true
+}
+
+_dkms_cleanup_old() {
+	current=$1
+	for module in ps5-smu ps5-icc-fan; do
+		for tree in /var/lib/dkms/$module/*; do
+			[ -d "$tree" ] || continue
+			oldver="${tree##*/}"
+			[ "$oldver" = "$current" ] && continue
+			dkms remove -m "$module" -v "$oldver" --all || true
+		done
+	done
+}
+
 post_install() {
 	ver="$(_dkmsver "$1")"
+	_dkms_cleanup_old "$ver"
 	kbuild="/lib/modules/$(uname -r)/build"
 	if [ ! -e "$kbuild" ]; then
 		echo "ps5-linux-power-dkms: missing $kbuild" >&2
@@ -21,8 +40,16 @@ post_install() {
 	modprobe ps5_icc_fan || true
 }
 
+pre_upgrade() {
+	ver="$(_dkmsver "$2")"
+	_dkms_remove "$ver"
+}
+
+post_upgrade() {
+	post_install "$1"
+}
+
 pre_remove() {
 	ver="$(_dkmsver "$1")"
-	dkms remove -m ps5-smu -v "$ver" --all || true
-	dkms remove -m ps5-icc-fan -v "$ver" --all || true
+	_dkms_remove "$ver"
 }

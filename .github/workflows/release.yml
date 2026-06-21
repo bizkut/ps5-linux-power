@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
-        run: dnf install -y gcc make rpm-build tar gzip findutils akmods
+        run: dnf install -y gcc make rpm-build tar gzip findutils
       - name: Build rpm packages
         run: VERSION="${PACKAGE_VERSION#v}" packaging/rpm/build-rpm.sh
       - name: Verify rpm packages
@@ -78,14 +78,20 @@ jobs:
       - rpm
       - arch
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-artifacts
           merge-multiple: true
+      - name: Set release tag
+        run: |
+          version="${PACKAGE_VERSION#v}"
+          echo "RELEASE_TAG=v${version}" >> "$GITHUB_ENV"
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           body_path: packaging/release/RELEASE_NOTES.md
           files: release-artifacts/*

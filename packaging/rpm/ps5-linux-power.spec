@@ -28,6 +28,12 @@ cp -a docs %{buildroot}%{_docdir}/%{name}/
 
 %post
 systemctl daemon-reload >/dev/null 2>&1 || true
+if [ "$1" = 1 ]; then
+	systemctl preset ps5gov.service >/dev/null 2>&1 || true
+fi
+if systemctl is-enabled --quiet ps5gov.service 2>/dev/null; then
+	systemctl restart ps5gov.service >/dev/null 2>&1 || true
+fi
 
 %files
 /usr/local/bin/ps5govctl

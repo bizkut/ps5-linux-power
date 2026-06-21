@@ -40,6 +40,12 @@ EOF
 #!/bin/sh
 set -e
 systemctl daemon-reload >/dev/null 2>&1 || true
+if [ -z "${2:-}" ]; then
+	systemctl preset ps5gov.service >/dev/null 2>&1 || true
+fi
+if systemctl is-enabled --quiet ps5gov.service 2>/dev/null; then
+	systemctl restart ps5gov.service >/dev/null 2>&1 || true
+fi
 exit 0
 EOF
 	chmod 0755 "$pkg_power/DEBIAN/postinst"
@@ -78,6 +84,20 @@ EOF
 	cat > "$pkg_dkms/DEBIAN/postinst" <<EOF
 #!/bin/sh
 set -e
+
+cleanup_old_dkms() {
+	module=\$1
+	for tree in /var/lib/dkms/\$module/*; do
+		[ -d "\$tree" ] || continue
+		oldver=\${tree##*/}
+		[ "\$oldver" = "$VERSION" ] && continue
+		dkms remove -m "\$module" -v "\$oldver" --all || true
+	done
+}
+
+cleanup_old_dkms ps5-smu
+cleanup_old_dkms ps5-icc-fan
+
 KBUILD="/lib/modules/\$(uname -r)/build"
 if [ ! -e "\$KBUILD" ]; then
 	echo "ps5-linux-power-dkms: missing \$KBUILD" >&2
@@ -98,10 +118,12 @@ EOF
 	cat > "$pkg_dkms/DEBIAN/prerm" <<EOF
 #!/bin/sh
 set -e
-if [ "\${1:-}" = remove ]; then
+case "\${1:-}" in
+remove|upgrade)
 	dkms remove -m ps5-smu -v "$VERSION" --all || true
 	dkms remove -m ps5-icc-fan -v "$VERSION" --all || true
-fi
+	;;
+esac
 exit 0
 EOF
 	chmod 0755 "$pkg_dkms/DEBIAN/postinst" "$pkg_dkms/DEBIAN/prerm"

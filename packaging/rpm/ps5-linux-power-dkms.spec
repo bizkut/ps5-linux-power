@@ -39,6 +39,15 @@ printf 'ps5_smu\n' > %{buildroot}/etc/modules-load.d/ps5-smu.conf
 printf 'ps5_icc_fan\n' > %{buildroot}/etc/modules-load.d/ps5-icc-fan.conf
 
 %post
+for module in ps5-smu ps5-icc-fan; do
+	for tree in /var/lib/dkms/$module/*; do
+		[ -d "$tree" ] || continue
+		oldver="${tree##*/}"
+		[ "$oldver" = "%{version}" ] && continue
+		dkms remove -m "$module" -v "$oldver" --all || true
+	done
+done
+
 KBUILD="/lib/modules/$(uname -r)/build"
 if [ ! -e "$KBUILD" ]; then
 	echo "ps5-linux-power-dkms: missing $KBUILD" >&2
@@ -56,7 +65,7 @@ modprobe ps5_smu || true
 modprobe ps5_icc_fan || true
 
 %preun
-if [ "$1" = 0 ]; then
+if [ "$1" = 0 ] || [ "$1" = 1 ]; then
 	dkms remove -m ps5-smu -v "%{version}" --all || true
 	dkms remove -m ps5-icc-fan -v "%{version}" --all || true
 fi
